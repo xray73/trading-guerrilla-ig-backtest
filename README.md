@@ -1,0 +1,1 @@
+# trading-guerrilla-ig-backtest
