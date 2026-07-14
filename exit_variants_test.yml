@@ -1,0 +1,39 @@
+name: Exit Variants Test
+
+# Testa breakeven-stop e breakeven+trailing su una matrice di parametri
+# (13 config totali), contro il baseline (target fisso 2R). Nessuna
+# simulazione random — solo backtest reali, job leggero.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  exit-variants-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Test varianti di uscita
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python exit_variants_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exit-variants-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
