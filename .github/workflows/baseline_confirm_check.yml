@@ -1,0 +1,43 @@
+name: Baseline Confirm Check
+
+# Calcola lo z-score del baseline 20/50+100/200 sui 3 periodi di conferma,
+# per chiudere il confronto omogeneo con il candidato 10/30+150/300 trovato
+# dalla grid search EMA. Job leggero: ~12-15 minuti (3 periodi x 30 seed,
+# nessuna griglia da esplorare).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  baseline-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Calcola baseline sui 3 periodi di conferma
+        run: python baseline_confirm_check.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-confirm-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
