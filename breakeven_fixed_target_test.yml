@@ -1,0 +1,41 @@
+name: Breakeven Fixed Target Retest
+
+# Ri-verifica "breakeven + target 2R invariato" con la metrica corretta
+# (PnL/drawdown) — questa combinazione era gia' stata testata ma con
+# il criterio sbagliato (win_rate+PF, prima della ridefinizione
+# dell'obiettivo). Ottavo tentativo della sessione, ma con
+# giustificazione metodologica chiara (correzione, non nuova idea).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  be-fixed-target-retest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Test breakeven + target 2R invariato
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python breakeven_fixed_target_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: be-fixed-target-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
