@@ -1,0 +1,71 @@
+name: Load Italy40 Gap Fix
+
+# Ricarica SOLO la finestra mancante scoperta in D1 per ITALY40
+# (aprile 2015 - giugno 2016) — non tocca il resto dei dati gia'
+# corretti. Stesso secret CLOUDFLARE_API_TOKEN gia' usato (permesso Edit
+# confermato).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  gap-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python pandas
+
+      - name: Scarica finestra mancante e genera SQL
+        run: python load_italy40_gap_fix.py
+
+      - name: Verifica file SQL generato
+        run: |
+          if [ ! -f insert_italy40_gapfix.sql ]; then
+            echo "ERRORE: file SQL non generato, interrompo."
+            exit 1
+          fi
+          wc -l insert_italy40_gapfix.sql
+          head -5 insert_italy40_gapfix.sql
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Installa wrangler
+        run: npm install -g wrangler
+
+      - name: Carica su D1 via wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler d1 execute trading-guerrilla-ig \
+            --remote \
+            --file=insert_italy40_gapfix.sql
+
+      - name: Verifica copertura mensile dopo il fix
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler d1 execute trading-guerrilla-ig \
+            --remote \
+            --command="SELECT strftime('%Y-%m', timestamp) as mese, COUNT(*) as n FROM ohlc_prices WHERE symbol='ITALY40' AND timestamp < '2017-01-01' GROUP BY mese ORDER BY mese"
+
+      - name: Carica file SQL come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: italy40-gapfix-sql-${{ github.run_id }}
+          path: insert_italy40_gapfix.sql
+          retention-days: 7
