@@ -1,0 +1,47 @@
+name: Trade Chart Review
+
+# Genera grafici candela+EMA+trade reali per revisione visiva, uno per
+# (periodo validato x strumento) = 10 grafici totali, nella finestra a
+# maggior concentrazione di perdite "falso segnale" per ciascuno — scelta
+# automatica, non manuale (vedi commento in plot_trade_windows.py).
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - 'run-chart-review*'
+
+concurrency:
+  group: trade-chart-review
+  cancel-in-progress: false
+
+jobs:
+  chart-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # molto più leggero della grid search: solo query + plot
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests matplotlib
+
+      - name: Genera grafici di revisione trade
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python plot_trade_windows.py
+
+      - name: Carica grafici come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-charts-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
