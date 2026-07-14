@@ -1,0 +1,39 @@
+name: Distance Correlation Check
+
+# Verifica se la distanza (in ATR) tra ingresso e livello di breakout
+# correla con l'esito del trade — solo correlazione, nessun filtro.
+# Job leggero: query trades + OHLC, nessun backtest da rilanciare.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  correlation-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests scipy
+
+      - name: Calcola correlazione distanza-esito
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python distance_correlation_check.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distance-correlation-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
