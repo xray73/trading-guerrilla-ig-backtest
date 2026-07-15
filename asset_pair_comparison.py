@@ -71,10 +71,19 @@ GOLD_CONFIG = eng.InstrumentConfig(
     min_tradable_size=0.10, margin_pct=0.05,
 )
 
+SMI_CONFIG = eng.InstrumentConfig(
+    name="SMI", tradable=True,
+    breakout_lookback=20, atr_multiplier=1.5, risk_pct=0.015,  # confermati adeguati (calibrazione non ha battuto la baseline, 15/07)
+    point_value=2.16,           # EUR da CHF 2 (screenshot 15/07/2026)
+    spread_fixed=2.0,           # verificato in orario di mercato attivo, 15/07/2026
+    min_tradable_size=0.10, margin_pct=0.10,
+)
+
 PAIRS: dict[str, list[str]] = {
     "DAX_FTSE100": ["DAX", "FTSE100"],
     "DAX_GOLD": ["DAX", "GOLD"],
     "FTSE100_GOLD": ["FTSE100", "GOLD"],
+    "SMI_FTSE100": ["SMI", "FTSE100"],
 }
 
 BASELINE_PAIR = "DAX_FTSE100"
@@ -88,6 +97,8 @@ MAX_SINGLE_PERIOD_DD = 0.35    # -35%, rete di sicurezza assoluta per questo tes
 def get_instrument_config(symbol: str) -> eng.InstrumentConfig:
     if symbol == "GOLD":
         return GOLD_CONFIG
+    if symbol == "SMI":
+        return SMI_CONFIG
     return eng.INSTRUMENTS[symbol]
 
 
@@ -138,6 +149,7 @@ def main():
         "DAX": g.load_full_ohlc("DAX_full.csv"),
         "FTSE100": g.load_full_ohlc("FTSE100_full.csv"),
         "GOLD": g.load_full_ohlc("GOLD_full.csv"),
+        "SMI": g.load_full_ohlc("SMI_full.csv"),
     }
 
     rows = []
