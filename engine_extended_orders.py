@@ -35,6 +35,14 @@ tutto ciò che supera i primi 3.
 Sanity check: con max_new_orders_per_day=3 (invariato), questa classe
 deve produrre risultati IDENTICI a BacktestEngineFloatingKillSwitch
 (il ramo "slot extra" non viene mai raggiunto).
+
+MODIFICA 16/07/2026 (solo diagnostica, NESSUN impatto sulla logica di
+trading/decisione): aggiunti extra_slot_skip_pnl_log e
+extra_slot_skip_minsize_log, stesso formato di extra_slot_log
+[(instrument, bar_timestamp), ...], per poter filtrare gli skip per
+finestra temporale in analisi esterne invece di leggere solo il
+contatore cumulativo su tutta la corsa. I contatori n_extra_slot_*
+restano invariati e continuano a funzionare come prima.
 """
 
 from __future__ import annotations
@@ -57,6 +65,8 @@ class BacktestEngineExtendedOrders(BacktestEngineFloatingKillSwitch):
         self.n_extra_slot_skipped_pnl = 0
         self.n_extra_slot_skipped_min_size = 0
         self.extra_slot_log: list[tuple] = []  # (instrument, entry_time) per correlazione con trades_df
+        self.extra_slot_skip_pnl_log: list[tuple] = []  # (instrument, bar_timestamp) skip per PnL<=0
+        self.extra_slot_skip_minsize_log: list[tuple] = []  # (instrument, bar_timestamp) skip per size minima
 
     def _open_position(self, instrument: str, direction: str, bar: pd.Series,
                         atr_at_entry: float, adx_at_entry: float):
@@ -71,12 +81,14 @@ class BacktestEngineExtendedOrders(BacktestEngineFloatingKillSwitch):
 
         if pnl_netto_finora <= 0:
             self.n_extra_slot_skipped_pnl += 1
+            self.extra_slot_skip_pnl_log.append((instrument, bar["timestamp"]))
             return
 
         standard_risk_amount = self.capital * inst.risk_pct
         modulated_risk_amount = min(self.extra_slot_pct * pnl_netto_finora, standard_risk_amount)
         if modulated_risk_amount <= 0:
             self.n_extra_slot_skipped_pnl += 1
+            self.extra_slot_skip_pnl_log.append((instrument, bar["timestamp"]))
             return
 
         spread = inst.spread_fixed
@@ -99,6 +111,7 @@ class BacktestEngineExtendedOrders(BacktestEngineFloatingKillSwitch):
             # rischio modulato insufficiente per la size minima -> salta,
             # NON forzare (violerebbe il tetto voluto per gli slot extra)
             self.n_extra_slot_skipped_min_size += 1
+            self.extra_slot_skip_minsize_log.append((instrument, bar["timestamp"]))
             return
 
         size = raw_size
