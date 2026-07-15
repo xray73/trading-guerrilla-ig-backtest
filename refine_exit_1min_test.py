@@ -90,6 +90,13 @@ def main():
     day_end = target_day + timedelta(days=1)
     warmup_start = target_day - timedelta(days=WARMUP_DAYS)
 
+    # versioni timezone-aware (UTC), usate SOLO per confrontare con
+    # entry_time del DataFrame trade (già tz-aware dopo pd.to_datetime
+    # con utc=True) — dukascopy_python.fetch continua a ricevere le
+    # versioni naive sopra, coerente col resto degli script del progetto
+    target_day_utc = pd.Timestamp(target_day, tz="UTC")
+    day_end_utc = pd.Timestamp(day_end, tz="UTC")
+
     print(f"Giornata target: {target_day.date()}")
 
     full_data_30m = {}
@@ -119,7 +126,7 @@ def main():
 
     trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"], utc=True)
     day_trades = trades_df[
-        (trades_df["entry_time"] >= target_day) & (trades_df["entry_time"] < day_end)
+        (trades_df["entry_time"] >= target_day_utc) & (trades_df["entry_time"] < day_end_utc)
     ].copy()
 
     print(f"\nTrade aperti nella giornata target: {len(day_trades)}")
