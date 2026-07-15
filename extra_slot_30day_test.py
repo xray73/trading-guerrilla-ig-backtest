@@ -157,11 +157,11 @@ def main():
     # prima erano contatori cumulativi su tutta la corsa, warmup incluso)
     skip_pnl_window = [
         (instr, ts) for instr, ts in engine_extended.extra_slot_skip_pnl_log
-        if window_start_utc <= pd.Timestamp(ts, tz="UTC") < window_end_utc
+        if window_start_utc <= pd.Timestamp(ts) < window_end_utc
     ]
     skip_minsize_window = [
         (instr, ts) for instr, ts in engine_extended.extra_slot_skip_minsize_log
-        if window_start_utc <= pd.Timestamp(ts, tz="UTC") < window_end_utc
+        if window_start_utc <= pd.Timestamp(ts) < window_end_utc
     ]
     n_attempts_window = len(extra_window) + len(skip_pnl_window) + len(skip_minsize_window)
 
