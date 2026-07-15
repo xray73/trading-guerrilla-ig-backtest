@@ -1,0 +1,44 @@
+name: Triple Asset Comparison (DAX+FTSE100+GOLD vs DAX+FTSE100)
+
+# Confronta il portafoglio a 3 strumenti (GOLD aggiunto, non sostituito)
+# contro il baseline attuale. Criterio fissato in chat 15/07/2026:
+#   1) PnL/|drawdown| positivo in 5/5 periodi
+#   2) rapporto aggregato >= baseline + 10%
+#   3) nessun periodo con drawdown singolo oltre -35%
+on:
+  workflow_dispatch: {}
+
+jobs:
+  triple-asset-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100+GOLD da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_pairs.py
+
+      - name: Confronto portafoglio 3 strumenti vs baseline
+        run: python triple_asset_comparison.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triple-asset-comparison-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
