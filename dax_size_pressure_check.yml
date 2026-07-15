@@ -1,0 +1,43 @@
+name: DAX Size Pressure Check (capitale reale 2.000€)
+
+# Quantifica la % di trade con size forzata al minimo per DAX/FTSE100,
+# al capitale REALE 2.000€ (non i 900€ dell'analisi originale RCA
+# Addendum 13/07 sez.24, che aveva lasciato la domanda aperta).
+# Job leggero: 2 strumenti x 5 periodi, nessuna griglia, ~3-5 minuti.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dax-size-pressure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Calcola pressione size minima al capitale reale
+        run: python dax_size_pressure_check.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dax-size-pressure-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
