@@ -1,0 +1,47 @@
+name: Extended Orders (test + impatto)
+
+# 1) Sanity check: con max 3 ordini/giorno (invariato), deve essere
+#    identico al motore con floating kill switch già adottato.
+# 2) Misura impatto reale sui 5 periodi con 5 ordini/giorno (slot 4-5
+#    modulati dal PnL di giornata, extra_slot_pct=1.0, tetto al
+#    rischio standard).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extended-orders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Sanity check (equivalenza + funzionamento)
+        run: python extended_orders_test.py
+
+      - name: Misura impatto sui 5 periodi
+        run: python extended_orders_impact.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-orders-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
