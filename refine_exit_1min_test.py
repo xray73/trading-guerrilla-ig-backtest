@@ -1,25 +1,20 @@
 """
-refine_exit_1min_test.py — Verifica quanto la chiusura approssimata a
-30min (come funziona oggi il motore, e come funzionerebbe la pipeline
-live pre-IG) diverge dalla chiusura "vera" ricostruita a 1 minuto.
+refine_exit_15day_test.py — Estensione a campione multi-giornata di
+refine_exit_1min_test.py.
 
-Procedura (proposta in chat 15/07/2026):
-  1. Scarica barre 30min DAX+FTSE100 con warmup sufficiente, fino
-     all'ultima giornata di trading completa disponibile
-  2. Scarica barre 1min DAX+FTSE100 SOLO per quella giornata
-  3. Fa girare il motore standard (BacktestEngineFloatingKillSwitch)
-     sui dati a 30min, isola i trade aperti in quella giornata
-  4. Per ciascun trade aperto quel giorno, ricostruisce l'uscita
-     "vera" scansionando le barre da 1 minuto a partire dall'entry,
-     e la confronta con l'uscita approssimata che il motore a 30min
-     avrebbe deciso
+Confronta la chiusura approssimata a 30min (motore standard) con la
+ricostruzione a 1 minuto, su un campione di N_TRADING_DAYS giornate di
+trading consecutive (invece della singola giornata del test originale),
+per avere statistiche aggregate minimamente significative.
 
-Nessuna modifica al motore, nessuna nuova logica operativa — è solo
-un'analisi di quanto conta l'approssimazione, prima di decidere se
-vale la pena costruire il raffinamento nella pipeline pre-IG.
+Convenzione timestamp confermata (15/07/2026): le barre Dukascopy sono
+etichettate con l'INIZIO del periodo. Il "ritardo" misurato tra
+exit_time_30m e exit_time_1m è quindi una quantità strutturale attesa
+(quanto in profondità nella barra da 30min è scattato realmente lo
+stop/target), non un artefatto da correggere.
 
-Non richiede D1 — analisi one-off, risultati stampati e salvati in
-un CSV locale.
+Nessuna modifica al motore, nessuna nuova logica operativa — analisi
+one-off, risultati stampati e salvati in CSV locale.
 """
 
 from __future__ import annotations
@@ -34,6 +29,7 @@ import engine as eng
 from engine_floating_kill_switch import BacktestEngineFloatingKillSwitch
 
 WARMUP_DAYS = 90
+N_TRADING_DAYS = 15  # numero di giornate di trading da includere nel campione
 SYMBOLS = {"DAX": INSTRUMENT_IDX_EUROPE_E_DAAX, "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100}
 
 
@@ -47,14 +43,25 @@ def fetch_bars(symbol_const, start: datetime, end: datetime, interval) -> pd.Dat
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+def trading_days_window(n_days: int, end_exclusive: datetime) -> tuple[datetime, datetime]:
+    """Ritorna (start, end) coprendo n_days giorni FERIALI (lun-ven)
+    che terminano appena prima di end_exclusive. Approssimazione:
+    non esclude festivi di borsa, solo weekend — sufficiente per
+    dimensionare la finestra di fetch."""
+    day = end_exclusive
+    counted = 0
+    start = day
+    while counted < n_days:
+        start -= timedelta(days=1)
+        if start.weekday() < 5:  # 0=lun ... 4=ven
+            counted += 1
+    return start, end_exclusive
+
+
 def refine_exit(trade_row, bars_1m: pd.DataFrame, inst: eng.InstrumentConfig) -> dict:
     """Scansiona le barre 1min dall'entry in avanti, trova il primo
-    minuto in cui stop o target vengono toccati davvero.
-
-    NOTA: ClosedTrade non salva stop_loss/take_profit direttamente —
-    li ricostruiamo con la STESSA formula usata da _open_position in
-    engine.py (mai modificato, solo letto): stop_distance = ATR * moltiplicatore,
-    target = stop_distance * rr_planned."""
+    minuto in cui stop o target vengono toccati davvero. Stessa
+    formula di _open_position in engine.py (mai modificato, solo letto)."""
     entry_time = trade_row["entry_time"]
     entry_price = trade_row["entry_price"]
     direction = trade_row["direction"]
@@ -85,32 +92,29 @@ def refine_exit(trade_row, bars_1m: pd.DataFrame, inst: eng.InstrumentConfig) ->
 
 
 def main():
-    # ultima giornata di trading completa: ieri (oggi potrebbe essere incompleto)
-    target_day = (datetime.utcnow() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = target_day + timedelta(days=1)
-    warmup_start = target_day - timedelta(days=WARMUP_DAYS)
+    # finestra campione: N_TRADING_DAYS giorni feriali fino a ieri (oggi potrebbe essere incompleto)
+    yesterday_end = (datetime.utcnow() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0) \
+        + timedelta(days=1)
+    window_start, window_end = trading_days_window(N_TRADING_DAYS, yesterday_end)
+    warmup_start = window_start - timedelta(days=WARMUP_DAYS)
 
-    # versioni timezone-aware (UTC), usate SOLO per confrontare con
-    # entry_time del DataFrame trade (già tz-aware dopo pd.to_datetime
-    # con utc=True) — dukascopy_python.fetch continua a ricevere le
-    # versioni naive sopra, coerente col resto degli script del progetto
-    target_day_utc = pd.Timestamp(target_day, tz="UTC")
-    day_end_utc = pd.Timestamp(day_end, tz="UTC")
+    window_start_utc = pd.Timestamp(window_start, tz="UTC")
+    window_end_utc = pd.Timestamp(window_end, tz="UTC")
 
-    print(f"Giornata target: {target_day.date()}")
+    print(f"Finestra campione: {window_start.date()} -> {window_end.date()} "
+          f"({N_TRADING_DAYS} giorni feriali)")
 
     full_data_30m = {}
     data_1m = {}
     for name, const in SYMBOLS.items():
-        print(f"Scarico {name} 30min ({warmup_start.date()} -> {day_end.date()})...")
-        full_data_30m[name] = fetch_bars(const, warmup_start, day_end, dukascopy_python.INTERVAL_MIN_30)
+        print(f"Scarico {name} 30min ({warmup_start.date()} -> {window_end.date()})...")
+        full_data_30m[name] = fetch_bars(const, warmup_start, window_end, dukascopy_python.INTERVAL_MIN_30)
         print(f"  {len(full_data_30m[name])} barre 30min")
 
-        print(f"Scarico {name} 1min (solo {target_day.date()})...")
-        data_1m[name] = fetch_bars(const, target_day, day_end, dukascopy_python.INTERVAL_MIN_1)
+        print(f"Scarico {name} 1min ({window_start.date()} -> {window_end.date()})...")
+        data_1m[name] = fetch_bars(const, window_start, window_end, dukascopy_python.INTERVAL_MIN_1)
         print(f"  {len(data_1m[name])} barre 1min")
 
-    # genera segnali sui dati 30min (stesso codice del backtest)
     signal_data = {}
     for name in SYMBOLS:
         inst = eng.INSTRUMENTS[name]
@@ -120,23 +124,21 @@ def main():
     trades_df, metrics_df = engine_.run(signal_data)
 
     if trades_df.empty:
-        print("\nNessun trade generato nell'intera finestra (warmup+giornata target). "
-              "Prova un'altra giornata o verifica i dati.")
+        print("\nNessun trade generato nella finestra warmup+campione.")
         return
 
     trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"], utc=True)
-    day_trades = trades_df[
-        (trades_df["entry_time"] >= target_day_utc) & (trades_df["entry_time"] < day_end_utc)
+    window_trades = trades_df[
+        (trades_df["entry_time"] >= window_start_utc) & (trades_df["entry_time"] < window_end_utc)
     ].copy()
 
-    print(f"\nTrade aperti nella giornata target: {len(day_trades)}")
-    if day_trades.empty:
-        print("Nessun trade aperto in questa giornata specifica — riprova con un'altra data "
-              "(il segnale non genera trigger tutti i giorni).")
+    print(f"\nTrade aperti nella finestra campione: {len(window_trades)}")
+    if window_trades.empty:
+        print("Nessun trade nel campione — prova ad allargare N_TRADING_DAYS.")
         return
 
     rows = []
-    for _, trade in day_trades.iterrows():
+    for _, trade in window_trades.iterrows():
         instrument = trade["instrument"]
         inst = eng.INSTRUMENTS[instrument]
         refined = refine_exit(trade, data_1m[instrument], inst)
@@ -158,26 +160,31 @@ def main():
             "ritardo_minuti_30m_vs_1m": delay_minutes,
             "stessa_causale": trade["exit_reason"] == refined["exit_reason_1m"],
         })
-        print(f"  {instrument} {trade['direction']}: 30min={trade['exit_reason']} @ {exit_30m_time} | "
-              f"1min={refined['exit_reason_1m']} @ {exit_1m_time} | "
-              f"ritardo={delay_minutes:.1f}min" if delay_minutes is not None else
-              f"  {instrument} {trade['direction']}: 30min={trade['exit_reason']} | 1min=dati insufficienti")
 
     result_df = pd.DataFrame(rows)
-    result_df.to_csv("refine_exit_1min_result.csv", index=False)
+    result_df.to_csv("refine_exit_15day_result.csv", index=False)
 
     print(f"\n{'='*70}")
-    print("RIEPILOGO")
+    print(f"RIEPILOGO — campione {N_TRADING_DAYS} giorni feriali")
     print(f"{'='*70}")
     print(f"Trade analizzati: {len(result_df)}")
-    print(f"Causale di uscita coincidente (30min vs 1min): "
-          f"{result_df['stessa_causale'].sum()}/{len(result_df)}")
+    coincident = result_df["stessa_causale"].sum()
+    print(f"Causale di uscita coincidente (30min vs 1min): {coincident}/{len(result_df)} "
+          f"({100*coincident/len(result_df):.1f}%)")
+
     valid_delays = result_df["ritardo_minuti_30m_vs_1m"].dropna()
     if len(valid_delays) > 0:
         print(f"Ritardo medio 30min vs 1min: {valid_delays.mean():.1f} minuti")
+        print(f"Ritardo mediano: {valid_delays.median():.1f} minuti")
         print(f"Ritardo massimo: {valid_delays.max():.1f} minuti")
+        print(f"Ritardo minimo: {valid_delays.min():.1f} minuti")
 
-    print(f"\nCompletato. File: refine_exit_1min_result.csv")
+    non_chiusi = (result_df["exit_reason_1m"] == "non_chiuso_entro_dati_1min").sum()
+    if non_chiusi > 0:
+        print(f"\nATTENZIONE: {non_chiusi} trade non chiusi entro i dati 1min disponibili "
+              f"(probabile uscita oltre la fine della finestra campione).")
+
+    print(f"\nCompletato. File: refine_exit_15day_result.csv")
 
 
 if __name__ == "__main__":
