@@ -33,7 +33,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: refine-exit-1min-${{ github.run_id }}
-          path: refine_exit_1min_result.csv
+          name: refine-exit-15day-${{ github.run_id }}
+          path: refine_exit_15day_result.csv
           retention-days: 30
           if-no-files-found: warn
