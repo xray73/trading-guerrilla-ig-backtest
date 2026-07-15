@@ -56,6 +56,7 @@ class BacktestEngineExtendedOrders(BacktestEngineFloatingKillSwitch):
         self.n_extra_slot_opened = 0
         self.n_extra_slot_skipped_pnl = 0
         self.n_extra_slot_skipped_min_size = 0
+        self.extra_slot_log: list[tuple] = []  # (instrument, entry_time) per correlazione con trades_df
 
     def _open_position(self, instrument: str, direction: str, bar: pd.Series,
                         atr_at_entry: float, adx_at_entry: float):
@@ -123,3 +124,4 @@ class BacktestEngineExtendedOrders(BacktestEngineFloatingKillSwitch):
         self.open_positions.append(pos)
         self._orders_today += 1
         self.n_extra_slot_opened += 1
+        self.extra_slot_log.append((instrument, bar["timestamp"]))
