@@ -1,0 +1,47 @@
+name: Floating Kill Switch (test + impatto)
+
+# 1) Sanity check obbligatorio: la sottoclasse deve essere identica al
+#    motore standard con soglia irraggiungibile, e deve bloccare
+#    uguale o più trade con la soglia reale.
+# 2) Misura l'impatto reale sui 5 periodi standard, capitale 2.000€
+#    (il vincolo di capitale reale, non i 900€ di analisi precedenti).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  floating-kill-switch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Sanity check (equivalenza + funzionamento)
+        run: python floating_kill_switch_test.py
+
+      - name: Misura impatto sui 5 periodi
+        run: python floating_kill_switch_impact.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: floating-kill-switch-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
