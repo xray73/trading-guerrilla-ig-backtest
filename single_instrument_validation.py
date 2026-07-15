@@ -26,12 +26,14 @@ come già fatto per GOLD in RCA sez.22.3; se il vantaggio grezzo non
 c'è nemmeno, il segnale si ferma qui senza sprecare una calibrazione
 completa, stesso principio dell'imbuto).
 
-NOTA SU SMI: spread stimato da UNA sola osservazione live (screenshot
-15/07, weekend/fuori orario — stessa trappola già documentata più
-volte nel progetto per spread osservati fuori orario di mercato attivo,
-RCA sez.1/13). Va riverificato in orario di mercato attivo prima di
-qualunque adozione, esattamente come richiesto per DAX/FTSE100 stessi
-(mai chiuso nel Charter).
+NOTA SU SMI: spread AGGIORNATO il 15/07/2026 con osservazione in
+orario di mercato attivo (SELL 14199.4/BUY 14201.4 = 2.0 punti),
+sostituisce la prima stima weekend (6.0 punti, gonfiata — stessa
+trappola già documentata più volte nel progetto, RCA sez.1/13). ATR
+multiplier e lookback restano COPIATI da DAX, non calibrati — se
+questo giro con spread corretto mostra vantaggio ma PnL assoluto
+ancora debole, il prossimo passo è la calibrazione vera (grid search),
+non un'altra correzione di singolo parametro.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ INSTRUMENT_REGISTRY: dict[str, eng.InstrumentConfig] = {
         breakout_lookback=20, atr_multiplier=1.5,   # COPIATI da DAX, non calibrati
         risk_pct=0.015,                              # allineato a FTSE100 (candidato sostituto)
         point_value=2.16,                            # EUR stimato da CHF 2 (screenshot 15/07)
-        spread_fixed=6.0,                             # punti, da UNA osservazione weekend — da riverificare
+        spread_fixed=2.0,                             # punti, verificato in orario di mercato attivo (15/07/2026, SELL 14199.4/BUY 14201.4)
         min_tradable_size=0.10, margin_pct=0.10,
     ),
 }
