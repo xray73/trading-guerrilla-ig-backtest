@@ -91,11 +91,21 @@ INSTRUMENT_REGISTRY: dict[str, eng.InstrumentConfig] = {
     ),
     # TOPIX: parametri da screenshot 15/07/2026 (size/margine) + spread
     # verificato in orario di mercato attivo nello stesso giorno.
-    # Costante Dukascopy NON ancora confermata — vedi FASE 0.
+    # Costante Dukascopy NON trovata (Dukascopy non copre TOPIX separatamente
+    # da Nikkei225) — NON utilizzabile per backtest, lasciato solo come nota.
     "TOPIX": eng.InstrumentConfig(
         name="TOPIX", tradable=True,
         breakout_lookback=20, atr_multiplier=1.5, risk_pct=0.015,  # grezzi, da calibrare
         point_value=0.87, spread_fixed=0.8,
+        min_tradable_size=0.50, margin_pct=0.10,
+    ),
+    # EMERGMKT (Emerging Markets Index IG): parametri da screenshot
+    # 14-15/07/2026, tutti verificati in orario di mercato attivo.
+    # Costante Dukascopy NON ancora confermata — vedi FASE 0.
+    "EMERGMKT": eng.InstrumentConfig(
+        name="EMERGMKT", tradable=True,
+        breakout_lookback=20, atr_multiplier=1.5, risk_pct=0.015,  # grezzi, da calibrare
+        point_value=1.0, spread_fixed=2.0,
         min_tradable_size=0.50, margin_pct=0.10,
     ),
 }
@@ -121,6 +131,7 @@ def phase0_resolve_dukascopy_constant(symbol: str) -> str:
     aliases = {
         "TOPIX": ["TOPIX", "TOKYO", "JPN", "JAPAN"],
         "IBEX35": ["IBEX", "SPAIN", "MAC", "IBC"],
+        "EMERGMKT": ["EMERG", "MSCI", "EM_IDX", "DEVELOPING"],
     }
     search_terms = aliases.get(symbol, [symbol])
 
