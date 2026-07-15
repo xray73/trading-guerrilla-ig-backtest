@@ -24,7 +24,7 @@ import requests
 
 DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
 CHUNK_SIZE = 5000
-SYMBOLS = ["DAX", "FTSE100", "GOLD"]
+SYMBOLS = ["DAX", "FTSE100", "GOLD", "SMI"]
 API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 
