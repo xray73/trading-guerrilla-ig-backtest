@@ -63,6 +63,54 @@ def compute_atr_regime(df: pd.DataFrame, window_days: int, bars_per_day_estimate
     return out
 
 
+def compute_atr_regime_persistent(df: pd.DataFrame, window_days: int, hysteresis: float = 0.05,
+                                    bars_per_day_estimate: int = 45) -> pd.DataFrame:
+    """Versione con isteresi del regime ATR, ispirata al concetto di
+    'jump penalty' dei modelli statistici di regime-switching (letteratura:
+    Nystrup et al., statistical jump models — la penalità aumenta la
+    persistenza del regime rispetto a modelli Markov semplici, riducendo
+    il rumore di cambio stato). Qui semplificata come bande di isteresi
+    sui confini dei tercili: per passare da 'low' a 'medium' serve
+    superare 0.3333+hysteresis, non solo sfiorare 0.3333 — e viceversa
+    per tornare indietro. Riduce il continuo cambio fascia vicino ai
+    bordi, senza richiedere l'ottimizzazione formale di una penalità
+    (sproporzionata vista la storia di tentativi falliti sul progetto).
+
+    Causale: la macchina a stati avanza barra per barra usando solo il
+    percentile già calcolato (a sua volta causale) fino a quel momento.
+    """
+    out = compute_atr_regime(df, window_days, bars_per_day_estimate)  # riusa il percentile causale già calcolato
+
+    pctiles = out["atr_pctile"].values
+    tiers = [None] * len(pctiles)
+    state = "medium"  # default prudente iniziale, come nella versione base
+
+    low_hi = 0.3333 + hysteresis   # soglia per USCIRE da low verso medium
+    low_lo = 0.3333 - hysteresis   # soglia per RIENTRARE in low da medium
+    high_lo = 0.6667 - hysteresis  # soglia per USCIRE da high verso medium
+    high_hi = 0.6667 + hysteresis  # soglia per RIENTRARE in high da medium
+
+    for i, p in enumerate(pctiles):
+        if pd.isna(p):
+            tiers[i] = state  # mantieni lo stato precedente finché la finestra non si riempie
+            continue
+        if state == "low":
+            if p > low_hi:
+                state = "medium"
+        elif state == "medium":
+            if p < low_lo:
+                state = "low"
+            elif p > high_hi:
+                state = "high"
+        elif state == "high":
+            if p < high_lo:
+                state = "medium"
+        tiers[i] = state
+
+    out["atr_tier"] = tiers
+    return out
+
+
 class BacktestEngineATRRegime(BacktestEngineFloatingKillSwitch):
 
     def __init__(self, *args, tier_multipliers: dict[str, float] | None = None, **kwargs):
