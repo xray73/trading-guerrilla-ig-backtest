@@ -1,0 +1,73 @@
+name: Load SMI Data
+
+# Scarica SMI (Swiss Market Index) da Dukascopy e lo carica in D1
+# (tabella ohlc_prices, symbol='SMI'). Stesso pattern di
+# load_italy40_data.yml, stesso secret CLOUDFLARE_API_TOKEN gia'
+# configurato.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  load-smi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python pandas
+
+      - name: Scarica dati e genera file SQL
+        run: python load_smi_data.py
+
+      - name: Verifica file SQL generato
+        run: |
+          if [ ! -f insert_smi.sql ]; then
+            echo "ERRORE: file SQL non generato, interrompo."
+            exit 1
+          fi
+          echo "Righe nel file SQL:"
+          wc -l insert_smi.sql
+          echo "Prime righe (anteprima):"
+          head -5 insert_smi.sql
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Installa wrangler
+        run: npm install -g wrangler
+
+      - name: Carica su D1 via wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler d1 execute trading-guerrilla-ig \
+            --remote \
+            --file=insert_smi.sql
+
+      - name: Verifica righe caricate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler d1 execute trading-guerrilla-ig \
+            --remote \
+            --command="SELECT COUNT(*) as n, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM ohlc_prices WHERE symbol='SMI'"
+
+      - name: Carica file SQL come artifact (per controllo manuale se serve)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smi-insert-sql-${{ github.run_id }}
+          path: insert_smi.sql
+          retention-days: 7
