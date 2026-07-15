@@ -1,0 +1,43 @@
+name: Cross Period Analysis (standard vs slot extra)
+
+# Separa le statistiche dei trade slot standard (1-3) da quelli extra
+# (4-5) per ciascun periodo, per capire se il peggioramento visto in
+# 2024-2025 è un problema di volume o di qualità. Aggiunge ATR medio
+# come primo elemento di contesto quantitativo.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  cross-period-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Analisi incrociata standard vs extra
+        run: python cross_period_analysis.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-period-analysis-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
