@@ -29,28 +29,49 @@ from engine_atr_regime import BacktestEngineATRRegime, compute_atr_regime_persis
 CAPITAL0 = 2000.0
 TRAIN_PERIODS = ["2015-2016", "2020-covid", "2023", "2024-2025"]
 TEST_PERIOD = "2026-ytd"
-WINDOW_CANDIDATES = [20, 40, 90]
+WINDOW_CANDIDATES = [20, 40, 90, 252]
 MULT_CANDIDATES = [0.5, 1.0, 1.5]
 PROMOTION_MARGIN = 0.10
 N_BOOTSTRAP = 300
 
 
 def prepare_period_data(period: str, full_data: dict, window_days: int) -> dict:
+    """NOTA IMPORTANTE (corretta 15/07/2026): g.slice_period() usa solo
+    90 giorni di margine prima dell'inizio periodo (sufficiente per
+    EMA/ADX, non per una finestra rolling di 252gg — con 90gg di margine
+    il percentile ATR resterebbe 'non disponibile' per gran parte del
+    periodo su finestre lunghe, degradando silenziosamente la fascia a
+    'medium' di default per quasi tutti i dati). Qui si usa un margine
+    ESTESO pari al massimo tra i 90gg standard e la finestra richiesta
+    + 10gg di sicurezza, solo per il calcolo del regime — poi si taglia
+    comunque al periodo ufficiale come sempre.
+    """
     data = {}
+    extended_warmup_days = max(g.WARMUP_DAYS, window_days + 10)
+
     for name in ["DAX", "FTSE100"]:
         inst = eng.INSTRUMENTS[name]
-        window, period_start = g.slice_period(full_data[name], period)
-        sig = eng.generate_signals(window, inst)
-        sig = g.trim_warmup(sig, period_start)
-        sig = compute_atr_regime(sig, window_days=window_days)
+        full_df = full_data[name]
+
+        start_str, end_str = g.PERIODS[period]
+        wide_start = pd.Timestamp(start_str, tz="UTC") - pd.Timedelta(days=extended_warmup_days)
+        wide_end = pd.Timestamp(end_str, tz="UTC") + pd.Timedelta(days=1)
+        wide_window = full_df[(full_df["timestamp"] >= wide_start) & (full_df["timestamp"] < wide_end)].reset_index(drop=True)
+
+        sig = eng.generate_signals(wide_window, inst)
+        sig = compute_atr_regime(sig, window_days=window_days)  # calcolato sulla finestra ESTESA
+
+        period_start = pd.Timestamp(start_str, tz="UTC")
+        sig = g.trim_warmup(sig, period_start)  # poi tagliato al periodo ufficiale, come sempre
         data[name] = sig
     return data
 
 
-def run_config(period: str, full_data: dict, window_days: int, multipliers: dict) -> dict:
-    data = prepare_period_data(period, full_data, window_days)
+def run_config(prepared_data: dict, period: str, multipliers: dict) -> dict:
+    """Riceve dati GIÀ preparati (fascia già calcolata) — nessun ricalcolo
+    costoso qui, solo l'esecuzione del motore (veloce)."""
     engine_ = BacktestEngineATRRegime(capital0=CAPITAL0, tier_multipliers=multipliers)
-    trades_df, metrics_df = engine_.run(data)
+    trades_df, metrics_df = engine_.run(prepared_data)
 
     pnl = float(metrics_df["pnl_total"].iloc[0])
     n = int(metrics_df["num_trades"].iloc[0])
@@ -113,8 +134,22 @@ def main():
 
     baseline_mult = {"low": 1.0, "medium": 1.0, "high": 1.0}
 
-    print("=== BASELINE (nessuna modulazione) su TRAIN ===")
-    baseline_train_results = [run_config(p, full_data, 40, baseline_mult) for p in TRAIN_PERIODS]
+    # ── CACHE: prepara i dati (percentile + isteresi, il calcolo costoso)
+    # UNA SOLA VOLTA per (periodo, finestra) — non per ogni combo di
+    # moltiplicatori. Prima di questa correzione (15/07/2026) il ciclo di
+    # isteresi bar-by-bar veniva rieseguito 288 volte invece di 15,
+    # causando il timeout del job (60 minuti, cancellato prima del termine).
+    print("=== Preparazione dati (cache, una volta per periodo/finestra) ===")
+    data_cache: dict[tuple[str, int], dict] = {}
+    all_periods_needed = TRAIN_PERIODS + [TEST_PERIOD]
+    for period in all_periods_needed:
+        for window_days in WINDOW_CANDIDATES:
+            data_cache[(period, window_days)] = prepare_period_data(period, full_data, window_days)
+            print(f"  preparato: {period} / finestra {window_days}gg")
+
+    print("\n=== BASELINE (nessuna modulazione) su TRAIN ===")
+    baseline_train_results = [run_config(data_cache[(p, WINDOW_CANDIDATES[0])], p, baseline_mult)
+                               for p in TRAIN_PERIODS]
     baseline_train_pnl, baseline_train_dd = aggregate_train(baseline_train_results)
     baseline_train_ratio = baseline_train_pnl / abs(baseline_train_dd) if baseline_train_dd != 0 else 0.0
     print(f"  Train: pnl={baseline_train_pnl:.1f} worst_dd={baseline_train_dd*100:.2f}% "
@@ -136,7 +171,7 @@ def main():
     for window_days in WINDOW_CANDIDATES:
         for low_m, med_m, high_m in mult_combos:
             multipliers = {"low": low_m, "medium": med_m, "high": high_m}
-            train_results = [run_config(p, full_data, window_days, multipliers) for p in TRAIN_PERIODS]
+            train_results = [run_config(data_cache[(p, window_days)], p, multipliers) for p in TRAIN_PERIODS]
             sum_pnl, worst_dd = aggregate_train(train_results)
             ratio = sum_pnl / abs(worst_dd) if worst_dd != 0 else 0.0
             grid_rows.append({
@@ -154,8 +189,8 @@ def main():
           f"(ratio train={best['train_ratio']:.1f})")
 
     print(f"\n=== VERIFICA su TEST ({TEST_PERIOD}, mai visto) ===")
-    baseline_test = run_config(TEST_PERIOD, full_data, 40, baseline_mult)  # finestra irrilevante per baseline (mult=1 ovunque)
-    best_test = run_config(TEST_PERIOD, full_data, best_window, best_mult)
+    baseline_test = run_config(data_cache[(TEST_PERIOD, WINDOW_CANDIDATES[0])], TEST_PERIOD, baseline_mult)
+    best_test = run_config(data_cache[(TEST_PERIOD, best_window)], TEST_PERIOD, best_mult)
 
     baseline_test_ratio = (baseline_test["pnl_total"] / abs(baseline_test["max_drawdown_pct"])
                             if baseline_test["max_drawdown_pct"] != 0 else 0.0)
