@@ -1,0 +1,39 @@
+name: Refine Exit 1min Test (analisi one-off)
+
+# Confronta la chiusura approssimata a 30min (come funziona oggi) con
+# una ricostruzione a 1 minuto, sull'ultima giornata di trading
+# completa. Analisi esplorativa, nessuna modifica al motore, nessuna
+# scrittura su D1 — solo un CSV per capire quanto conta
+# l'approssimazione prima di decidere se costruire il raffinamento
+# nella pipeline live pre-IG.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  refine-exit-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui analisi
+        run: python refine_exit_1min_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refine-exit-1min-${{ github.run_id }}
+          path: refine_exit_1min_result.csv
+          retention-days: 30
+          if-no-files-found: warn
