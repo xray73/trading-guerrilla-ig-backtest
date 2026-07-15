@@ -132,10 +132,16 @@ def main():
 
     print("\n=== GRID SEARCH su TRAIN (4 periodi uniti) ===")
     grid_rows = []
-    mult_combos = list(itertools.product(MULT_CANDIDATES, repeat=3))  # (low, medium, high)
+    all_mult_combos = list(itertools.product(MULT_CANDIDATES, repeat=3))  # (low, medium, high)
+    # ESCLUDE le combo uniformi (low==medium==high): quelle equivalgono a
+    # "più rischio ovunque", non a una vera differenziazione di regime —
+    # scoperto nel primo giro (15/07/2026): la combo uniforme 1.5x/1.5x/1.5x
+    # vinceva il grid search senza rappresentare l'ipotesi che si vuole
+    # testare. Qui isoliamo SOLO le combo genuinamente differenziate.
+    mult_combos = [c for c in all_mult_combos if not (c[0] == c[1] == c[2])]
     total_combos = len(WINDOW_CANDIDATES) * len(mult_combos)
-    print(f"Totale combinazioni: {total_combos} (finestre {WINDOW_CANDIDATES} x "
-          f"{len(mult_combos)} combo moltiplicatori)")
+    print(f"Totale combinazioni (SOLO differenziate, uniformi escluse): {total_combos} "
+          f"({len(all_mult_combos) - len(mult_combos)} uniformi escluse su {len(all_mult_combos)} totali)")
 
     for window_days in WINDOW_CANDIDATES:
         for low_m, med_m, high_m in mult_combos:
@@ -149,7 +155,7 @@ def main():
             })
 
     grid_df = pd.DataFrame(grid_rows)
-    grid_df.to_csv("results/atr_regime_grid_train.csv", index=False)
+    grid_df.to_csv("results/atr_regime_grid_train_differentiated.csv", index=False)
 
     best = grid_df.loc[grid_df["train_ratio"].idxmax()]
     best_window = int(best["window_days"])
@@ -207,7 +213,7 @@ def main():
         "noise_best_std": noise_best.get("ratio_std"),
         "noise_ci_overlap": overlap,
     }])
-    summary.to_csv("results/atr_regime_verdict.csv", index=False)
+    summary.to_csv("results/atr_regime_verdict_differentiated.csv", index=False)
 
     print(f"\nCompletato. File in results/.")
 
