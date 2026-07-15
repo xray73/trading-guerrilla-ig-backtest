@@ -1,0 +1,44 @@
+name: Baseline By Asset Test (N giorni, analisi descrittiva)
+
+# Solo motore baseline (nessuno slot extra), metriche di periodo
+# separate per DAX/FTSE100/combinato. Finestra in giorni feriali
+# selezionabile al lancio (tetto 180, imposto anche lato script).
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Numero di giorni feriali della finestra (max 180)'
+        required: false
+        default: '30'
+        type: string
+
+jobs:
+  baseline-by-asset-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui analisi
+        run: python baseline_by_asset_test.py --days ${{ github.event.inputs.days }}
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-by-asset-${{ github.event.inputs.days }}day-${{ github.run_id }}
+          path: |
+            baseline_*day_trades.csv
+            baseline_*day_summary.csv
+          retention-days: 30
+          if-no-files-found: warn
