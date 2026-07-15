@@ -1,0 +1,43 @@
+name: Extended Orders Train Test (con stima rumore)
+
+# Rifà la valutazione degli slot extra con la disciplina corretta:
+# train (4 periodi uniti) / test (2026-ytd, mai visto) + stima del
+# rumore via bootstrap. Nessuna soglia percentuale fissa importata da
+# altri test — la decisione si basa sul rapporto segnale/rumore.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extended-orders-train-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Valutazione train/test con stima rumore
+        run: python extended_orders_train_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-orders-train-test-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
