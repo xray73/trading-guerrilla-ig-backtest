@@ -1,0 +1,37 @@
+name: Extra Slot 15day Test (analisi descrittiva)
+
+# Conta e analizza i trade che sarebbero scattati sugli slot extra
+# 4°/5° nella finestra di 15 giorni feriali più recente. Analisi
+# descrittiva collaterale, NON riapre la decisione già presa (fronte
+# chiuso il 15/07/2026, segnale/rumore=0.012 su test train/test).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extra-slot-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui analisi
+        run: python extra_slot_15day_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-slot-15day-${{ github.run_id }}
+          path: extra_slot_15day_result.csv
+          retention-days: 30
+          if-no-files-found: warn
