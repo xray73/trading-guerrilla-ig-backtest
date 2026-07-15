@@ -1,0 +1,27 @@
+name: Discover Dukascopy Instrument (SMI) v2 - solo indici
+
+# Il primo giro ha trovato solo azioni svizzere singole, non l'indice.
+# Questo filtra SOLO le costanti IDX/INDICES prima di cercare Svizzera.
+# Nessun dato scaricato, nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python
+
+      - name: Scopri costanti indice disponibili
+        run: python discover_dukascopy_smi_v2.py
