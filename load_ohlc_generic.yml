@@ -1,0 +1,94 @@
+name: Load OHLC Data (generico, multi-simbolo)
+
+# Sostituisce load_italy40_data.yml / load_smi_data.yml con un unico
+# workflow parametrizzato. Per aggiungere un nuovo simbolo: eseguire
+# prima un discover_dukascopy_*.py dedicato per trovare/confermare la
+# costante, poi aggiungerla a SYMBOL_MAP in load_ohlc_generic.py — da
+# quel momento è disponibile qui senza scrivere un nuovo workflow.
+#
+# Uso: Actions -> "Run workflow" -> campo "symbols" -> es. "SMI,IBEX35"
+# (vedi SYMBOL_MAP in load_ohlc_generic.py per i simboli disponibili)
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Simboli da caricare, separati da virgola (es. SMI,IBEX35)'
+        required: true
+        default: 'SMI'
+        type: string
+
+jobs:
+  load-ohlc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python pandas
+
+      - name: Scarica dati e genera file SQL
+        run: python load_ohlc_generic.py "${{ github.event.inputs.symbols }}"
+
+      - name: Verifica file SQL generati
+        run: |
+          if [ ! -f generated_sql_files.txt ] || [ ! -s generated_sql_files.txt ]; then
+            echo "ERRORE: nessun file SQL generato, interrompo."
+            exit 1
+          fi
+          echo "File SQL generati:"
+          cat generated_sql_files.txt
+          while read -r f; do
+            [ -z "$f" ] && continue
+            echo "--- $f ---"
+            wc -l "$f"
+            head -3 "$f"
+          done < generated_sql_files.txt
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Installa wrangler
+        run: npm install -g wrangler
+
+      - name: Carica ogni file su D1 via wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          while read -r f; do
+            [ -z "$f" ] && continue
+            echo "Carico $f..."
+            wrangler d1 execute trading-guerrilla-ig --remote --file="$f"
+          done < generated_sql_files.txt
+
+      - name: Verifica righe caricate per ogni simbolo richiesto
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          IFS=',' read -ra SYMS <<< "${{ github.event.inputs.symbols }}"
+          for s in "${SYMS[@]}"; do
+            s_trim=$(echo "$s" | xargs)
+            echo "--- $s_trim ---"
+            wrangler d1 execute trading-guerrilla-ig --remote \
+              --command="SELECT COUNT(*) as n, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM ohlc_prices WHERE symbol='$s_trim'"
+          done
+
+      - name: Carica file SQL come artifact (per controllo manuale se serve)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohlc-insert-sql-${{ github.run_id }}
+          path: insert_*.sql
+          retention-days: 7
+          if-no-files-found: warn
