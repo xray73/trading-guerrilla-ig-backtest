@@ -1,0 +1,33 @@
+name: Accantonamento Validation (sanity check + 5 periodi ufficiali)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  accantonamento-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui validazione
+        run: python accantonamento_validation.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accantonamento-validation-${{ github.run_id }}
+          path: accantonamento_validation_summary.csv
+          retention-days: 30
+          if-no-files-found: warn
