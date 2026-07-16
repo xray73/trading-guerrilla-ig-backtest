@@ -76,11 +76,17 @@ def fetch_historical(symbol_const, start: datetime, end: datetime) -> pd.DataFra
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def fetch_latest_bar(symbol_const, day_start: datetime) -> pd.DataFrame:
+def fetch_latest_bar(symbol_const, day_start: datetime) -> tuple[pd.DataFrame, str]:
     """Usa live_fetch per l'ultima barra da 30min, più aggiornata di fetch()
     su intervalli non-tick (vedi nota progetto sulla fonte prezzi pre-IG).
     Prende il primo DataFrame utile dal generator e si ferma (esecuzione
-    one-shot, non streaming continuo — questo script gira via cron)."""
+    one-shot, non streaming continuo — questo script gira via cron).
+
+    Ritorna (df, fonte) dove fonte è 'live_fetch' o 'fetch_fallback' —
+    se live_fetch non restituisce nulla o solleva un'eccezione, ripiega
+    su fetch() normale (più "delayed" sull'ultima barra ma comunque
+    utilizzabile, meglio di saltare lo strumento del tutto).
+    """
     time_unit = getattr(dukascopy_python, "TIME_UNIT_MIN", None) or \
                 getattr(dukascopy_python, "TIME_UNIT_MINUTE", None)
     if time_unit is None:
@@ -89,16 +95,40 @@ def fetch_latest_bar(symbol_const, day_start: datetime) -> pd.DataFrame:
             "verificare il nome esatto nella versione installata (pip show dukascopy-python) "
             "e correggere qui prima del primo run reale."
         )
-    iterator = dukascopy_python.live_fetch(
-        symbol_const, 30, time_unit, dukascopy_python.OFFER_SIDE_BID, day_start, None,
-    )
-    for df in iterator:
-        df = df.reset_index()
+
+    try:
+        iterator = dukascopy_python.live_fetch(
+            symbol_const, 30, time_unit, dukascopy_python.OFFER_SIDE_BID, day_start, None,
+        )
+        for df in iterator:
+            df = df.reset_index()
+            ts_col = df.columns[0]
+            df = df.rename(columns={ts_col: "timestamp"})
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            if not df.empty:
+                return df, "live_fetch"
+            break  # generator ha dato un df vuoto, non insistere: passa al fallback
+    except Exception as e:
+        print(f"  [diagnostica] live_fetch ha sollevato un'eccezione: {type(e).__name__}: {e}")
+
+    # fallback: fetch() normale sulle ultime ore, prendo la barra più recente disponibile
+    print(f"  [diagnostica] live_fetch vuoto o fallito, ripiego su fetch() normale (dati più 'delayed').")
+    fallback_start = datetime.now(timezone.utc) - timedelta(hours=6)
+    fallback_end = datetime.now(timezone.utc) + timedelta(minutes=30)
+    try:
+        df = dukascopy_python.fetch(
+            symbol_const, dukascopy_python.INTERVAL_MIN_30, dukascopy_python.OFFER_SIDE_BID,
+            fallback_start, fallback_end,
+        ).reset_index()
         ts_col = df.columns[0]
         df = df.rename(columns={ts_col: "timestamp"})
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        return df.sort_values("timestamp").reset_index(drop=True)
-    return pd.DataFrame()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df, "fetch_fallback"
+    except Exception as e:
+        print(f"  [diagnostica] anche il fallback fetch() è fallito: {type(e).__name__}: {e}")
+        return pd.DataFrame(), "nessuna_fonte"
 
 
 def get_or_create_today_state(today_str: str) -> dict:
@@ -160,11 +190,13 @@ def main():
     for name, const in SYMBOLS.items():
         inst = eng.INSTRUMENTS[name]
         hist = fetch_historical(const, warmup_start, day_start)
-        latest = fetch_latest_bar(const, day_start)
+        latest, source = fetch_latest_bar(const, day_start)
 
         if latest.empty:
-            print(f"{name}: nessuna barra live disponibile (live_fetch vuoto), salto.")
+            print(f"{name}: nessuna barra disponibile da nessuna fonte (live_fetch e fallback entrambi vuoti), salto.")
             continue
+        if source == "fetch_fallback":
+            print(f"{name}: uso dati di fallback (fetch normale, possibile ritardo sull'ultima barra)")
 
         combined = pd.concat([hist, latest]).drop_duplicates(subset="timestamp") \
                        .sort_values("timestamp").reset_index(drop=True)
