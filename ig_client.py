@@ -151,6 +151,8 @@ class IGSession:
         params = {"resolution": resolution, "from": start, "to": end, "pageSize": 0}
         resp = requests.get(f"{BASE_URL}/prices/{epic}", params=params,
                              headers=self._headers(version="3"), timeout=30)
+        if resp.status_code != 200:
+            print(f"[ig_client] Errore {resp.status_code} su /prices/{epic}: {resp.text[:500]}")
         resp.raise_for_status()
         return resp.json()
 
