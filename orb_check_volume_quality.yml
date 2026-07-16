@@ -1,0 +1,24 @@
+name: Check Volume Quality (diagnostica per ORB+VWAP)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check-volume-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Verifica qualità volume
+        run: python check_volume_quality.py
