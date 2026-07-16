@@ -79,7 +79,12 @@ def get_period_signal_data(period_start: str, period_end: str) -> dict:
     for name, const in SYMBOLS.items():
         raw = fetch_bars(const, warmup_start.to_pydatetime(), p_end.to_pydatetime())
         inst = eng.INSTRUMENTS[name]
-        signal_data[name] = eng.generate_signals(raw, inst)
+        full_signals = eng.generate_signals(raw, inst)
+        # CRITICO: taglia al periodo ufficiale SOLO DOPO aver calcolato gli
+        # indicatori sul warmup (EMA/ADX/ATR/rolling_high/low hanno già il
+        # lookback corretto "cotto dentro" a questo punto) — il motore non
+        # deve mai vedere né tradare sulle barre di warmup.
+        signal_data[name] = full_signals[full_signals["timestamp"] >= p_start].reset_index(drop=True)
     return signal_data
 
 
