@@ -1,0 +1,43 @@
+name: Live Execute (test manuale, dry_run di default)
+
+# Ciclo completo: gestione posizioni aperte + rilevazione nuovi segnali
+# + invio ordine (dry_run=True di default, nessun ordine reale finché
+# DRY_RUN non viene impostato esplicitamente a "false" in questo file
+# o come input). Trigger manuale per ora, non ancora nel cron
+# automatico — sostituirà live_signal_check.py nel cron solo dopo
+# essere stato testato con successo più volte in dry_run.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'true = simula soltanto (default, sicuro), false = invia ordini reali su demo'
+        required: false
+        default: 'true'
+        type: string
+
+jobs:
+  live-execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Esegui live_execute
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python live_execute.py
