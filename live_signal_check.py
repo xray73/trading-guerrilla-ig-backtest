@@ -131,27 +131,84 @@ def fetch_latest_bar(symbol_const, day_start: datetime) -> tuple[pd.DataFrame, s
         return pd.DataFrame(), "nessuna_fonte"
 
 
+CONSOLIDATE_PCT = 0.4      # opzione 3, decisa in chat 16/07/2026, validata su 5 periodi ufficiali
+THRESHOLD_MULT = 1.5
+
+
+def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
+    """Se il nuovo giorno inaugura un nuovo mese di calendario rispetto
+    all'ultimo stato noto, applica il check di accantonamento (opzione 3
+    mensile, validata su 5 periodi ufficiali il 16/07/2026) sul capitale
+    di fine mese precedente. Ritorna i valori aggiornati da usare per il
+    nuovo record del giorno. Se accantonamento_attivo=0, non fa nulla
+    (interruttore per disattivarlo senza toccare il codice)."""
+    if not prev_state.get("accantonamento_attivo", 1):
+        return {
+            "capital": prev_state["capital_current"],
+            "accantonato": prev_state.get("accantonato", 0.0),
+            "reference": prev_state.get("consolidamento_reference") or prev_state["capital_current"],
+            "threshold": prev_state.get("consolidamento_threshold") or prev_state["capital_current"] * THRESHOLD_MULT,
+        }
+
+    capital = prev_state["capital_current"]
+    accantonato = prev_state.get("accantonato", 0.0) or 0.0
+    reference = prev_state.get("consolidamento_reference") or capital
+    threshold = prev_state.get("consolidamento_threshold") or (reference * THRESHOLD_MULT)
+
+    prev_month = prev_state["trade_date"][:7]  # 'YYYY-MM'
+    this_month = today_str[:7]
+
+    if this_month != prev_month:
+        while capital > threshold:
+            gain = capital - reference
+            consolidated = CONSOLIDATE_PCT * gain
+            if consolidated <= 0:
+                break
+            accantonato += consolidated
+            capital -= consolidated
+            reference = capital
+            threshold = reference * THRESHOLD_MULT
+            print(f"[accantonamento] Consolidati {consolidated:.2f} EUR al cambio mese "
+                  f"({prev_month} -> {this_month}). Investito: {capital:.2f}  Accantonato: {accantonato:.2f}")
+
+    return {"capital": capital, "accantonato": accantonato, "reference": reference, "threshold": threshold}
+
+
 def get_or_create_today_state(today_str: str) -> dict:
     rows = d1_query(f"SELECT * FROM live_daily_state WHERE trade_date = '{today_str}'")
     if rows:
         return rows[0]
 
-    # trova l'ultimo capitale noto (giorno precedente), altrimenti CAPITAL0_DEFAULT
     prev_rows = d1_query(
-        "SELECT capital_current FROM live_daily_state ORDER BY trade_date DESC LIMIT 1"
+        "SELECT * FROM live_daily_state ORDER BY trade_date DESC LIMIT 1"
     )
-    starting_capital = prev_rows[0]["capital_current"] if prev_rows else CAPITAL0_DEFAULT
+
+    if prev_rows:
+        prev_state = prev_rows[0]
+        updated = apply_monthly_consolidation_if_needed(today_str, prev_state)
+        starting_capital = updated["capital"]
+        starting_accantonato = updated["accantonato"]
+        reference = updated["reference"]
+        threshold = updated["threshold"]
+    else:
+        starting_capital = CAPITAL0_DEFAULT
+        starting_accantonato = 0.0
+        reference = CAPITAL0_DEFAULT
+        threshold = CAPITAL0_DEFAULT * THRESHOLD_MULT
 
     d1_query(
         "INSERT INTO live_daily_state "
-        "(trade_date, account_type, capital_start_of_day, capital_current) "
-        f"VALUES ('{today_str}', 'demo', {starting_capital}, {starting_capital})"
+        "(trade_date, account_type, capital_start_of_day, capital_current, accantonato, "
+        "consolidamento_reference, consolidamento_threshold, accantonamento_attivo) "
+        f"VALUES ('{today_str}', 'demo', {starting_capital}, {starting_capital}, {starting_accantonato}, "
+        f"{reference}, {threshold}, 1)"
     )
-    print(f"Creato nuovo record live_daily_state per {today_str}, capitale iniziale {starting_capital:.2f} EUR")
+    print(f"Creato nuovo record live_daily_state per {today_str}: "
+          f"investito={starting_capital:.2f} EUR, accantonato={starting_accantonato:.2f} EUR")
     return {
         "trade_date": today_str, "account_type": "demo",
         "capital_start_of_day": starting_capital, "capital_current": starting_capital,
-        "orders_today": 0, "kill_switch_triggered": 0,
+        "accantonato": starting_accantonato, "orders_today": 0, "kill_switch_triggered": 0,
     }
 
 
@@ -175,7 +232,8 @@ def main():
     day_state = get_or_create_today_state(today_str)
     kill_switch_active = bool(day_state["kill_switch_triggered"])
     orders_today = day_state["orders_today"]
-    print(f"Stato giornata: capitale={day_state['capital_current']:.2f} EUR, "
+    print(f"Stato giornata: investito={day_state['capital_current']:.2f} EUR, "
+          f"accantonato={day_state.get('accantonato', 0.0):.2f} EUR, "
           f"ordini oggi={orders_today}/{eng.PARAMS.max_new_orders_per_day}, "
           f"kill switch attivo={kill_switch_active}\n")
 
