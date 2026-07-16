@@ -199,14 +199,15 @@ def load_credentials_from_env() -> IGCredentials:
 
 
 if __name__ == "__main__":
-    # self-test minimale: login, lettura prezzo DAX, nessun ordine.
+    # self-test minimale: login, lettura prezzo DAX e FTSE100, nessun ordine.
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
         print(f"Sessione OK, account {session.account_id}")
-        try:
-            price = session.get_price("DAX")
-            print(f"Prezzo DAX: bid={price['bid']} offer={price['offer']} "
-                  f"stato_mercato={price['market_status']}")
-        except Exception as e:
-            print(f"ATTENZIONE: lettura prezzo fallita ({type(e).__name__}: {e}) — "
-                  f"probabile EPIC_MAP da correggere con l'EPIC reale da IG.")
+        for instrument in ("DAX", "FTSE100"):
+            try:
+                price = session.get_price(instrument)
+                print(f"Prezzo {instrument}: bid={price['bid']} offer={price['offer']} "
+                      f"stato_mercato={price['market_status']}")
+            except Exception as e:
+                print(f"ATTENZIONE: lettura prezzo {instrument} fallita ({type(e).__name__}: {e}) — "
+                      f"probabile EPIC_MAP da correggere con l'EPIC reale da IG.")
