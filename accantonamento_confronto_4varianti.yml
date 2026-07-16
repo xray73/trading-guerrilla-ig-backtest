@@ -1,0 +1,33 @@
+name: Accantonamento Confronto 4 Varianti (motore vero)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  confronto-4varianti:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui confronto
+        run: python accantonamento_confronto_4varianti.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accantonamento-confronto-${{ github.run_id }}
+          path: accantonamento_confronto_4varianti.csv
+          retention-days: 30
+          if-no-files-found: warn
