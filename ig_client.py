@@ -214,7 +214,8 @@ def load_credentials_from_env() -> IGCredentials:
 
 if __name__ == "__main__":
     # self-test: login, lettura prezzo DAX e FTSE100 (EPIC entrambi
-    # verificati il 16/07/2026), nessun ordine.
+    # verificati il 16/07/2026), test dry_run di ordine/chiusura (nessun
+    # ordine reale inviato).
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
         print(f"Sessione OK, account {session.account_id}")
@@ -225,3 +226,25 @@ if __name__ == "__main__":
                       f"stato_mercato={price['market_status']}")
             except Exception as e:
                 print(f"ATTENZIONE: lettura prezzo {instrument} fallita ({type(e).__name__}: {e})")
+
+        print("\nTest place_order in dry_run (nessun ordine reale inviato)...")
+        try:
+            result = session.place_order(
+                instrument="DAX", direction="BUY", size=0.50,
+                stop_distance=20.0, limit_distance=40.0, dry_run=True,
+            )
+            print(f"  Risultato dry_run: {result}")
+        except Exception as e:
+            print(f"  ATTENZIONE: place_order dry_run ha sollevato un'eccezione "
+                  f"({type(e).__name__}: {e}) — non dovrebbe succedere in dry_run, "
+                  f"controllare la costruzione del payload.")
+
+        print("\nTest close_position in dry_run (nessuna chiusura reale inviata)...")
+        try:
+            result = session.close_position(
+                deal_id="DEAL_ID_FITTIZIO_PER_TEST", direction="SELL", size=0.50, dry_run=True,
+            )
+            print(f"  Risultato dry_run: {result}")
+        except Exception as e:
+            print(f"  ATTENZIONE: close_position dry_run ha sollevato un'eccezione "
+                  f"({type(e).__name__}: {e})")
