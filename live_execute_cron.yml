@@ -1,0 +1,46 @@
+name: Live Execute Cron (ogni 30min, orario di mercato, dry_run)
+
+# Ciclo completo automatico: gestione posizioni aperte + rilevazione
+# segnali + sizing + invio ordine simulato (DRY_RUN=true fisso in
+# questo cron — nessun ordine reale può partire da qui finché questo
+# file non viene modificato esplicitamente e consapevolmente).
+#
+# Orario UTC placeholder: 06:00-20:30, lun-ven — stesso limite già
+# segnalato per live_signal_cron.yml, da affinare contro gli orari
+# CFD esatti di DAX/FTSE100 su IG.
+#
+# NOTA: questo file sostituisce live_signal_cron.yml come cron attivo.
+# Se avevi già caricato live_signal_cron.yml, disattivalo o eliminalo
+# per evitare due cron sovrapposti che scrivono sullo stesso stato D1.
+
+on:
+  schedule:
+    - cron: '0,30 6-20 * * 1-5'
+  workflow_dispatch: {}   # per test manuali fuori orario, dry_run comunque fisso a true qui
+
+jobs:
+  live-execute-cron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Esegui live_execute (dry_run fisso)
+        env:
+          DRY_RUN: "true"
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python live_execute.py
