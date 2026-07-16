@@ -134,6 +134,26 @@ class IGSession:
             "update_time": snapshot.get("updateTime"),
         }
 
+    def get_historical_prices(self, instrument: str, resolution: str, start: str, end: str) -> dict:
+        """Legge prezzi storici da IG (endpoint /prices/{epic}), inclusi
+        lastTradedVolume. resolution: 'MINUTE', 'MINUTE_5', 'MINUTE_30', ecc.
+        start/end: 'YYYY-MM-DDTHH:MM:SS'. Consuma la quota settimanale di
+        10.000 punti dato (si resetta ogni 7 giorni) — usare con parsimonia,
+        non per backtest ampi.
+
+        Ritorna {'prices': [...], 'allowance': {...}} — controllare sempre
+        'allowance' per sapere quanta quota resta.
+        """
+        epic = EPIC_MAP.get(instrument)
+        if not epic:
+            raise ValueError(f"Nessun EPIC mappato per '{instrument}'.")
+
+        params = {"resolution": resolution, "from": start, "to": end, "pageSize": 0}
+        resp = requests.get(f"{BASE_URL}/prices/{epic}", params=params,
+                             headers=self._headers(version="3"), timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
     # ---- ordini ----
 
     def place_order(self, instrument: str, direction: Literal["BUY", "SELL"],
