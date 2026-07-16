@@ -1,0 +1,38 @@
+name: Opt2 Opt3 5 Periods Test (analisi descrittiva)
+
+# Scenario "accantonamento" opzione 2 (giveback 30% su nuovo massimo)
+# e opzione 3 (gradini +50%, consolida 40%), ciascuna con check
+# continuo e mensile, sui 5 periodi storici ufficiali del progetto.
+# Più dati di prima (2 meccanismi invece di 1), può richiedere più
+# tempo del solito.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  opt2-opt3-5periods-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui analisi
+        run: python opt2_opt3_5periods_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opt2-opt3-5periods-${{ github.run_id }}
+          path: opt2_opt3_5periods_summary.csv
+          retention-days: 30
+          if-no-files-found: warn
