@@ -21,4 +21,4 @@ jobs:
         run: pip install dukascopy-python pandas numpy
 
       - name: Verifica qualità volume
-        run: python check_volume_quality.py
+        run: python orb_check_volume_quality.py
