@@ -1,0 +1,31 @@
+name: Live Signal Check (test manuale, sola rilevazione)
+
+# Rileva segnali sull'ultima barra chiusa e verifica azionabilità contro
+# lo stato D1 (live_daily_state, live_positions). NESSUN ordine inviato.
+# Trigger manuale per ora — il cron automatico ogni 30min in orario di
+# mercato è il punto 4 della sequenza (non ancora creato).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  live-signal-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Check segnale live
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python live_signal_check.py
