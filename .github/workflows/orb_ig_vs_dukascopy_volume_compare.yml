@@ -1,0 +1,28 @@
+name: ORB - IG vs Dukascopy Volume Compare (FTSE100, campione 10gg)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ig-vs-dukascopy-volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Confronto volume IG vs Dukascopy
+        env:
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+        run: python orb_ig_vs_dukascopy_volume_compare.py
