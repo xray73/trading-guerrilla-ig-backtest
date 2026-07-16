@@ -1,0 +1,28 @@
+name: IG Client Self-Test (login + prezzo, nessun ordine)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ig-client-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install requests
+
+      - name: Self-test ig_client
+        env:
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+        run: python ig_client.py
