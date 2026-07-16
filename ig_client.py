@@ -36,8 +36,8 @@ BASE_URL = "https://demo-api.ig.com/gateway/deal"
 # di usare questo modulo per ordini reali. Questi sono placeholder plausibili
 # basati sulla nomenclatura standard IG, NON confermati.
 EPIC_MAP = {
-    "DAX": "IX.D.DAX.IFMM.IP",
-    "FTSE100": "IX.D.FTSE.IFMM.IP",
+    "DAX": "IX.D.DAX.IFMM.IP",       # verificato funzionante (prezzo letto correttamente)
+    "FTSE100": "IX.D.FTSE.IFE.IP",   # corretto il 16/07/2026: "FTSE 100 Cash (1€)", trovato via search_markets
 }
 
 
@@ -213,23 +213,15 @@ def load_credentials_from_env() -> IGCredentials:
 
 
 if __name__ == "__main__":
-    # self-test: login, lettura prezzo DAX, ricerca EPIC FTSE100 (quello
-    # attuale in EPIC_MAP non restituisce prezzi validi), nessun ordine.
+    # self-test: login, lettura prezzo DAX e FTSE100 (EPIC entrambi
+    # verificati il 16/07/2026), nessun ordine.
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
         print(f"Sessione OK, account {session.account_id}")
-        try:
-            price = session.get_price("DAX")
-            print(f"Prezzo DAX: bid={price['bid']} offer={price['offer']} "
-                  f"stato_mercato={price['market_status']}")
-        except Exception as e:
-            print(f"ATTENZIONE: lettura prezzo DAX fallita ({type(e).__name__}: {e})")
-
-        print("\nRicerca mercati per 'FTSE 100'...")
-        try:
-            results = session.search_markets("FTSE 100")
-            for r in results[:15]:
-                print(f"  epic={r['epic']:35s} nome={r['instrumentName']:30s} "
-                      f"tipo={r['instrumentType']:15s} expiry={r['expiry']}")
-        except Exception as e:
-            print(f"ATTENZIONE: ricerca mercati fallita ({type(e).__name__}: {e})")
+        for instrument in ("DAX", "FTSE100"):
+            try:
+                price = session.get_price(instrument)
+                print(f"Prezzo {instrument}: bid={price['bid']} offer={price['offer']} "
+                      f"stato_mercato={price['market_status']}")
+            except Exception as e:
+                print(f"ATTENZIONE: lettura prezzo {instrument} fallita ({type(e).__name__}: {e})")
