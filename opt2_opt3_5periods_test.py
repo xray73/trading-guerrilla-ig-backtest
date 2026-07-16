@@ -98,6 +98,7 @@ def simulate_opt2(trades: pd.DataFrame, monthly_only: bool) -> dict:
     peak = CAPITAL0
     side_pool = 0.0
     last_month = None
+    equity_rows = []  # (timestamp, totale=investito+accantonato) per il drawdown
 
     def try_ratchet():
         nonlocal invested, peak, side_pool
@@ -126,9 +127,12 @@ def simulate_opt2(trades: pd.DataFrame, monthly_only: bool) -> dict:
             try_ratchet()  # check continuo, dopo ogni trade
 
         last_month = trade_month
+        equity_rows.append((t["exit_time"], invested + side_pool))
 
     if monthly_only:
         try_ratchet()  # check finale di chiusura periodo
+
+    max_dd_pct, max_dd_eur = compute_drawdown(equity_rows, CAPITAL0)
 
     return {
         "n_trades": len(trades),
@@ -136,7 +140,21 @@ def simulate_opt2(trades: pd.DataFrame, monthly_only: bool) -> dict:
         "accantonato_finale": side_pool,
         "totale_finale": invested + side_pool,
         "rendimento_pct": 100 * (invested + side_pool - CAPITAL0) / CAPITAL0,
+        "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_eur": max_dd_eur,
     }
+
+
+def compute_drawdown(equity_rows: list[tuple], capital0: float) -> tuple[float, float]:
+    """equity_rows: [(timestamp, totale), ...] in ordine cronologico.
+    Ritorna (max_drawdown_pct, max_drawdown_eur)."""
+    if not equity_rows:
+        return 0.0, 0.0
+    equity = pd.Series([r[1] for r in equity_rows])
+    running_max = equity.cummax()
+    dd_eur = equity - running_max
+    dd_pct = dd_eur / running_max
+    return dd_pct.min() * 100, dd_eur.min()
 
 
 def simulate_opt3(trades: pd.DataFrame, monthly_only: bool) -> dict:
@@ -145,7 +163,7 @@ def simulate_opt3(trades: pd.DataFrame, monthly_only: bool) -> dict:
     threshold = reference * THRESHOLD_MULT
     side_pool = 0.0
     last_month = None
-    rows = []
+    equity_rows = []
 
     def try_consolidate():
         nonlocal invested, reference, threshold, side_pool
@@ -176,10 +194,12 @@ def simulate_opt3(trades: pd.DataFrame, monthly_only: bool) -> dict:
             try_consolidate()  # check continuo, dopo ogni trade
 
         last_month = trade_month
-        rows.append({"entry_time": t["entry_time"], "invested": invested, "side_pool": side_pool})
+        equity_rows.append((t["exit_time"], invested + side_pool))
 
     if monthly_only:
         try_consolidate()  # check finale di chiusura periodo
+
+    max_dd_pct, max_dd_eur = compute_drawdown(equity_rows, CAPITAL0)
 
     final_invested = invested
     final_side_pool = side_pool
@@ -189,7 +209,8 @@ def simulate_opt3(trades: pd.DataFrame, monthly_only: bool) -> dict:
         "accantonato_finale": final_side_pool,
         "totale_finale": final_invested + final_side_pool,
         "rendimento_pct": 100 * (final_invested + final_side_pool - CAPITAL0) / CAPITAL0,
-        "n_trigger": None,  # calcolato a parte se serve
+        "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_eur": max_dd_eur,
     }
 
 
@@ -211,51 +232,67 @@ def main():
         res_opt2_continuo = simulate_opt2(trades, monthly_only=False)
         res_opt2_mensile = simulate_opt2(trades, monthly_only=True)
 
-        # riferimento: nessun meccanismo (capitale reale con compounding pieno)
-        real_final = CAPITAL0 + trades["pnl"].sum() * 0  # placeholder, ricalcolo sotto con compounding reale
         # replay "reale" (nessun tetto) per confronto, stessa tecnica di scaling
         invested_real = CAPITAL0
+        real_equity_rows = []
         for _, t in trades.iterrows():
             instr = t["instrument"]
             risk_amount = RISK_PCT[instr] * invested_real
             scale = risk_amount / t["risk_amount"] if t["risk_amount"] != 0 else 1.0
             invested_real += t["pnl"] * scale
+            real_equity_rows.append((t["exit_time"], invested_real))
+        real_dd_pct, real_dd_eur = compute_drawdown(real_equity_rows, CAPITAL0)
 
-        print(f"  Reale (senza meccanismo):  {invested_real:>10.0f} EUR ({100*(invested_real-CAPITAL0)/CAPITAL0:+.1f}%)")
+        print(f"  Reale (senza meccanismo):  {invested_real:>10.0f} EUR ({100*(invested_real-CAPITAL0)/CAPITAL0:+.1f}%)  "
+              f"MaxDD={real_dd_pct:.1f}% ({real_dd_eur:.0f} EUR)")
         print(f"  Opt.2 check continuo:      investito={res_opt2_continuo['invested_finale']:.0f}  "
               f"accantonato={res_opt2_continuo['accantonato_finale']:.0f}  totale={res_opt2_continuo['totale_finale']:.0f} "
-              f"({res_opt2_continuo['rendimento_pct']:+.1f}%)")
+              f"({res_opt2_continuo['rendimento_pct']:+.1f}%)  MaxDD={res_opt2_continuo['max_drawdown_pct']:.1f}% "
+              f"({res_opt2_continuo['max_drawdown_eur']:.0f} EUR)")
         print(f"  Opt.2 check mensile:       investito={res_opt2_mensile['invested_finale']:.0f}  "
               f"accantonato={res_opt2_mensile['accantonato_finale']:.0f}  totale={res_opt2_mensile['totale_finale']:.0f} "
-              f"({res_opt2_mensile['rendimento_pct']:+.1f}%)")
+              f"({res_opt2_mensile['rendimento_pct']:+.1f}%)  MaxDD={res_opt2_mensile['max_drawdown_pct']:.1f}% "
+              f"({res_opt2_mensile['max_drawdown_eur']:.0f} EUR)")
         print(f"  Opt.3 check continuo:      investito={res_continuo['invested_finale']:.0f}  "
               f"accantonato={res_continuo['accantonato_finale']:.0f}  totale={res_continuo['totale_finale']:.0f} "
-              f"({res_continuo['rendimento_pct']:+.1f}%)")
+              f"({res_continuo['rendimento_pct']:+.1f}%)  MaxDD={res_continuo['max_drawdown_pct']:.1f}% "
+              f"({res_continuo['max_drawdown_eur']:.0f} EUR)")
         print(f"  Opt.3 check mensile:       investito={res_mensile['invested_finale']:.0f}  "
               f"accantonato={res_mensile['accantonato_finale']:.0f}  totale={res_mensile['totale_finale']:.0f} "
-              f"({res_mensile['rendimento_pct']:+.1f}%)")
+              f"({res_mensile['rendimento_pct']:+.1f}%)  MaxDD={res_mensile['max_drawdown_pct']:.1f}% "
+              f"({res_mensile['max_drawdown_eur']:.0f} EUR)")
         print()
 
         all_rows.append({
             "periodo": label, "n_trade": len(trades),
             "reale_finale": invested_real,
             "reale_rendimento_pct": 100*(invested_real-CAPITAL0)/CAPITAL0,
+            "reale_max_dd_pct": real_dd_pct,
+            "reale_max_dd_eur": real_dd_eur,
             "opt2_continuo_investito": res_opt2_continuo["invested_finale"],
             "opt2_continuo_accantonato": res_opt2_continuo["accantonato_finale"],
             "opt2_continuo_totale": res_opt2_continuo["totale_finale"],
             "opt2_continuo_rendimento_pct": res_opt2_continuo["rendimento_pct"],
+            "opt2_continuo_max_dd_pct": res_opt2_continuo["max_drawdown_pct"],
+            "opt2_continuo_max_dd_eur": res_opt2_continuo["max_drawdown_eur"],
             "opt2_mensile_investito": res_opt2_mensile["invested_finale"],
             "opt2_mensile_accantonato": res_opt2_mensile["accantonato_finale"],
             "opt2_mensile_totale": res_opt2_mensile["totale_finale"],
             "opt2_mensile_rendimento_pct": res_opt2_mensile["rendimento_pct"],
+            "opt2_mensile_max_dd_pct": res_opt2_mensile["max_drawdown_pct"],
+            "opt2_mensile_max_dd_eur": res_opt2_mensile["max_drawdown_eur"],
             "opt3_continuo_investito": res_continuo["invested_finale"],
             "opt3_continuo_accantonato": res_continuo["accantonato_finale"],
             "opt3_continuo_totale": res_continuo["totale_finale"],
             "opt3_continuo_rendimento_pct": res_continuo["rendimento_pct"],
+            "opt3_continuo_max_dd_pct": res_continuo["max_drawdown_pct"],
+            "opt3_continuo_max_dd_eur": res_continuo["max_drawdown_eur"],
             "opt3_mensile_investito": res_mensile["invested_finale"],
             "opt3_mensile_accantonato": res_mensile["accantonato_finale"],
             "opt3_mensile_totale": res_mensile["totale_finale"],
             "opt3_mensile_rendimento_pct": res_mensile["rendimento_pct"],
+            "opt3_mensile_max_dd_pct": res_mensile["max_drawdown_pct"],
+            "opt3_mensile_max_dd_eur": res_mensile["max_drawdown_eur"],
         })
 
     summary_df = pd.DataFrame(all_rows)
