@@ -98,6 +98,20 @@ class IGSession:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.logout()
 
+    def search_markets(self, search_term: str) -> list[dict]:
+        """Cerca mercati per nome (es. 'FTSE 100', 'Germany 40') e
+        ritorna epic/nome/tipo di ciascun risultato — modo affidabile
+        per trovare l'EPIC esatto invece di cercarlo a mano nell'interfaccia."""
+        resp = requests.get(f"{BASE_URL}/markets", params={"searchTerm": search_term},
+                             headers=self._headers(version="1"), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return [
+            {"epic": m.get("epic"), "instrumentName": m.get("instrumentName"),
+             "instrumentType": m.get("instrumentType"), "expiry": m.get("expiry")}
+            for m in data.get("markets", [])
+        ]
+
     # ---- lettura prezzi ----
 
     def get_price(self, instrument: str) -> dict:
@@ -199,15 +213,23 @@ def load_credentials_from_env() -> IGCredentials:
 
 
 if __name__ == "__main__":
-    # self-test minimale: login, lettura prezzo DAX e FTSE100, nessun ordine.
+    # self-test: login, lettura prezzo DAX, ricerca EPIC FTSE100 (quello
+    # attuale in EPIC_MAP non restituisce prezzi validi), nessun ordine.
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
         print(f"Sessione OK, account {session.account_id}")
-        for instrument in ("DAX", "FTSE100"):
-            try:
-                price = session.get_price(instrument)
-                print(f"Prezzo {instrument}: bid={price['bid']} offer={price['offer']} "
-                      f"stato_mercato={price['market_status']}")
-            except Exception as e:
-                print(f"ATTENZIONE: lettura prezzo {instrument} fallita ({type(e).__name__}: {e}) — "
-                      f"probabile EPIC_MAP da correggere con l'EPIC reale da IG.")
+        try:
+            price = session.get_price("DAX")
+            print(f"Prezzo DAX: bid={price['bid']} offer={price['offer']} "
+                  f"stato_mercato={price['market_status']}")
+        except Exception as e:
+            print(f"ATTENZIONE: lettura prezzo DAX fallita ({type(e).__name__}: {e})")
+
+        print("\nRicerca mercati per 'FTSE 100'...")
+        try:
+            results = session.search_markets("FTSE 100")
+            for r in results[:15]:
+                print(f"  epic={r['epic']:35s} nome={r['instrumentName']:30s} "
+                      f"tipo={r['instrumentType']:15s} expiry={r['expiry']}")
+        except Exception as e:
+            print(f"ATTENZIONE: ricerca mercati fallita ({type(e).__name__}: {e})")
