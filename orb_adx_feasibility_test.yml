@@ -1,0 +1,35 @@
+name: ORB ADX Feasibility Test (fattibilita, con/senza filtro)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  orb-adx-feasibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui test fattibilita
+        run: python orb_adx_feasibility_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-adx-feasibility-${{ github.run_id }}
+          path: |
+            orb_adx_feasibility_filtered.csv
+            orb_adx_feasibility_unfiltered.csv
+          retention-days: 30
+          if-no-files-found: warn
