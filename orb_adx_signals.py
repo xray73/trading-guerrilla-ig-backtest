@@ -78,7 +78,11 @@ def generate_orb_adx_signals(df: pd.DataFrame, inst: eng.InstrumentConfig,
     out["signal"] = None
 
     for date, day_rows in out.groupby("date"):
-        session_open = _session_open_utc_for_date(pd.Timestamp(date), instrument_name)
+        date_ts = pd.Timestamp(date)
+        if date_ts.weekday() >= 5:  # 5=sabato, 6=domenica — Xetra/LSE non aprono nel weekend
+            continue
+
+        session_open = _session_open_utc_for_date(date_ts, instrument_name)
         day_bars = day_rows[day_rows["timestamp"] >= session_open]
         if day_bars.empty:
             continue
