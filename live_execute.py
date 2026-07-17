@@ -73,14 +73,83 @@ def fetch_historical(symbol_const, start: datetime, end: datetime) -> pd.DataFra
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def get_today_state(today_str: str) -> dict:
+CONSOLIDATE_PCT = 0.4      # opzione 3 mensile, validata su 5 periodi ufficiali il 16-17/07/2026
+THRESHOLD_MULT = 1.5
+
+
+def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
+    if not prev_state.get("accantonamento_attivo", 1):
+        return {
+            "capital": prev_state["capital_current"],
+            "accantonato": prev_state.get("accantonato", 0.0) or 0.0,
+            "reference": prev_state.get("consolidamento_reference") or prev_state["capital_current"],
+            "threshold": prev_state.get("consolidamento_threshold") or prev_state["capital_current"] * THRESHOLD_MULT,
+        }
+
+    capital = prev_state["capital_current"]
+    accantonato = prev_state.get("accantonato", 0.0) or 0.0
+    reference = prev_state.get("consolidamento_reference") or capital
+    threshold = prev_state.get("consolidamento_threshold") or (reference * THRESHOLD_MULT)
+
+    prev_month = prev_state["trade_date"][:7]
+    this_month = today_str[:7]
+
+    if this_month != prev_month:
+        while capital > threshold:
+            gain = capital - reference
+            consolidated = CONSOLIDATE_PCT * gain
+            if consolidated <= 0:
+                break
+            accantonato += consolidated
+            capital -= consolidated
+            reference = capital
+            threshold = reference * THRESHOLD_MULT
+            print(f"[accantonamento] Consolidati {consolidated:.2f} EUR al cambio mese "
+                  f"({prev_month} -> {this_month}). Investito: {capital:.2f}  Accantonato: {accantonato:.2f}")
+
+    return {"capital": capital, "accantonato": accantonato, "reference": reference, "threshold": threshold}
+
+
+def get_or_create_today_state(today_str: str) -> dict:
     rows = d1_query(f"SELECT * FROM live_daily_state WHERE trade_date = '{today_str}'")
-    if not rows:
-        raise RuntimeError(
-            f"Nessuno stato per {today_str} in live_daily_state — esegui prima "
-            f"live_signal_check.py (che lo crea) o inseriscilo manualmente."
-        )
-    return rows[0]
+    if rows:
+        return rows[0]
+
+    prev_rows = d1_query("SELECT * FROM live_daily_state ORDER BY trade_date DESC LIMIT 1")
+
+    if prev_rows:
+        updated = apply_monthly_consolidation_if_needed(today_str, prev_rows[0])
+        starting_capital = updated["capital"]
+        starting_accantonato = updated["accantonato"]
+        reference = updated["reference"]
+        threshold = updated["threshold"]
+    else:
+        starting_capital = CAPITAL0_DEFAULT
+        starting_accantonato = 0.0
+        reference = CAPITAL0_DEFAULT
+        threshold = CAPITAL0_DEFAULT * THRESHOLD_MULT
+
+    d1_query(
+        "INSERT INTO live_daily_state "
+        "(trade_date, account_type, capital_start_of_day, capital_current, accantonato, "
+        "consolidamento_reference, consolidamento_threshold, accantonamento_attivo) "
+        f"VALUES ('{today_str}', 'demo', {starting_capital}, {starting_capital}, {starting_accantonato}, "
+        f"{reference}, {threshold}, 1)"
+    )
+    print(f"Creato nuovo record live_daily_state per {today_str}: "
+          f"investito={starting_capital:.2f} EUR, accantonato={starting_accantonato:.2f} EUR")
+    return {
+        "trade_date": today_str, "account_type": "demo",
+        "capital_start_of_day": starting_capital, "capital_current": starting_capital,
+        "accantonato": starting_accantonato, "orders_today": 0, "kill_switch_triggered": 0,
+    }
+
+
+def get_today_state(today_str: str) -> dict:
+    """Mantenuto per compatibilità interna — ora delega alla versione
+    che crea lo stato se manca, così live_execute.py è autosufficiente
+    e non dipende dall'aver lanciato live_signal_check.py prima."""
+    return get_or_create_today_state(today_str)
 
 
 def manage_open_positions(session: IGSession, today_str: str):
