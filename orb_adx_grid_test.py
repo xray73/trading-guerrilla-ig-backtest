@@ -46,7 +46,7 @@ CAPITAL0 = 2000.0
 WARMUP_DAYS = 30
 SYMBOLS = {"DAX": INSTRUMENT_IDX_EUROPE_E_DAAX, "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100}
 
-TRAIN_PERIOD = ("2024-2025", "2024-01-03", "2025-12-31")
+TRAIN_PERIOD = ("2020-covid", "2020-01-02", "2020-12-30")
 
 ADX_GRID = [0.0, 15.0, 20.0, 25.0]
 
@@ -143,8 +143,8 @@ def main():
         all_rows.append({"adx_threshold": threshold, "gruppo": "FTSE100", **ftse})
 
     summary_df = pd.DataFrame(all_rows)
-    summary_df.to_csv("orb_adx_grid_train_results.csv", index=False)
-    print("Completato. File: orb_adx_grid_train_results.csv")
+    summary_df.to_csv("orb_adx_grid_train_results_2020covid.csv", index=False)
+    print("Completato. File: orb_adx_grid_train_results_2020covid.csv")
     print("\nRicorda: questo è il periodo di TRAIN. La soglia scelta qui va verificata su un periodo "
           "mai toccato (es. 2023 o altro dei 5 ufficiali) prima di considerarla definitiva.")
 
