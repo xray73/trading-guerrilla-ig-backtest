@@ -26,14 +26,15 @@ for attr in all_attrs:
         matches.append(attr)
 
 if matches:
-    print("Possibili corrispondenze trovate:")
+    print("Possibili corrispondenze trovate (potrebbero essere singoli titoli, non l'indice):")
     for m in matches:
         print(f"  {m} = {getattr(inst_module, m)!r}")
 else:
     print("NESSUNA corrispondenza trovata con i termini di ricerca.")
-    print("\nStampo tutte le costanti IDX_EUROPE per ispezione manuale:")
-    for attr in all_attrs:
-        if "IDX_EUROPE" in attr:
-            print(f"  {attr} = {getattr(inst_module, attr)!r}")
+
+print("\nElenco COMPLETO delle costanti IDX_EUROPE (per trovare l'indice vero, non i singoli titoli):")
+for attr in all_attrs:
+    if "IDX_EUROPE" in attr:
+        print(f"  {attr} = {getattr(inst_module, attr)!r}")
 
 print("\n=== Fine ricerca. ===")
