@@ -15,7 +15,7 @@ name: Live Execute Cron (ogni 30min, orario di mercato, dry_run)
 
 on:
   schedule:
-    - cron: '0,30 6-20 * * 1-5'
+    - cron: '5,35 6-20 * * 1-5'
   workflow_dispatch: {}   # per test manuali fuori orario, dry_run comunque fisso a true qui
 
 jobs:
