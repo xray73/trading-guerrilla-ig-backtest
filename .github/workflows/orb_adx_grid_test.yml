@@ -28,6 +28,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: orb-adx-grid-${{ github.run_id }}
-          path: orb_adx_grid_train_results.csv
+          path: orb_adx_grid_train_results_2020covid.csv
           retention-days: 30
           if-no-files-found: warn
