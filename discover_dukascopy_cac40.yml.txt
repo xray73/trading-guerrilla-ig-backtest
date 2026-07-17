@@ -1,0 +1,24 @@
+name: Discover Dukascopy CAC40 (trova costante corretta)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  discover-cac40:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python
+
+      - name: Cerca costante CAC40
+        run: python discover_dukascopy_cac40.py
