@@ -1,0 +1,35 @@
+name: Verify IG Spread (campione, orario di mercato)
+
+# Campiona lo spread reale IG e lo salva in D1 per confronto con lo
+# spread fisso assunto dal motore. Un solo campione non basta - va
+# lanciato più volte durante la giornata (manualmente per ora, o
+# agganciato al cron esistente in futuro) per costruire una
+# distribuzione prima di trarre conclusioni.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify-ig-spread:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install requests
+
+      - name: Campiona spread IG
+        env:
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python verify_ig_spread.py
