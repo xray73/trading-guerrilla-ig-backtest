@@ -1,0 +1,33 @@
+name: Pairs Cointegration Test (DAX-CAC40)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pairs-cointegration-cac40:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy statsmodels
+
+      - name: Esegui test cointegrazione DAX-CAC40
+        run: python pairs_cointegration_cac40_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pairs-cointegration-cac40-${{ github.run_id }}
+          path: pairs_cointegration_results_cac40.csv
+          retention-days: 30
+          if-no-files-found: warn
