@@ -1,0 +1,33 @@
+name: Spread Sensitivity Revalidation (Variante 6, 5 periodi)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  spread-sensitivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui test sensibilita spread
+        run: python spread_sensitivity_revalidation.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spread-sensitivity-${{ github.run_id }}
+          path: spread_sensitivity_revalidation.csv
+          retention-days: 30
+          if-no-files-found: warn
