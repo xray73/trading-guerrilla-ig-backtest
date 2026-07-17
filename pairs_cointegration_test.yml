@@ -1,0 +1,33 @@
+name: Pairs Cointegration Test (DAX-FTSE100, prerequisito)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pairs-cointegration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy statsmodels
+
+      - name: Esegui test cointegrazione
+        run: python pairs_cointegration_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pairs-cointegration-${{ github.run_id }}
+          path: pairs_cointegration_results.csv
+          retention-days: 30
+          if-no-files-found: warn
