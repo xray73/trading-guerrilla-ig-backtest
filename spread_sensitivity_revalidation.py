@@ -96,10 +96,10 @@ def main():
     print("Trattare come indicazione preliminare, non come ricalibrazione definitiva.\n")
 
     original_instruments = eng.INSTRUMENTS
-    realistic_instruments = {
-        name: dataclasses.replace(inst, spread_fixed=REALISTIC_SPREAD[name])
-        for name, inst in eng.INSTRUMENTS.items()
-    }
+    realistic_instruments = dict(eng.INSTRUMENTS)  # copia, parto da tutte le voci originali
+    for name in SYMBOLS:  # sovrascrivo lo spread SOLO su DAX/FTSE100, non su altre voci (es. US500)
+        realistic_instruments[name] = dataclasses.replace(
+            eng.INSTRUMENTS[name], spread_fixed=REALISTIC_SPREAD[name])
 
     all_rows = []
     for label, p_start, p_end in PERIODS:
