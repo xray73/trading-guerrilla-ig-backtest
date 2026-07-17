@@ -14,9 +14,11 @@ name: Live Execute Cron (ogni 30min, orario di mercato, dry_run)
 # per evitare due cron sovrapposti che scrivono sullo stesso stato D1.
 
 on:
-  schedule:
-    - cron: '5,35 6-20 * * 1-5'
-  workflow_dispatch: {}   # per test manuali fuori orario, dry_run comunque fisso a true qui
+  workflow_dispatch: {}   # attivato ora dal cron esterno (cron-job.org, ogni 30min)
+                          # + disponibile per test manuali. Schedule nativo GitHub
+                          # rimosso il 17/07/2026: inaffidabile (vedi discussione in
+                          # chat), sostituito interamente dal cron esterno per evitare
+                          # anche il rischio di doppia esecuzione sovrapposta.
 
 jobs:
   live-execute-cron:
