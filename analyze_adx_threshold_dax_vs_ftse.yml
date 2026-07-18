@@ -1,0 +1,42 @@
+name: Analyze ADX Threshold DAX vs FTSE100
+
+# Due domande: (1) la soglia ADX>20 di V6 predice il movimento
+# favorevole ugualmente bene per DAX e FTSE100 (riusa
+# compute_persistence, stessa metodologia già validata su ITALY40)?
+# (2) come si muove l'ADX medio mensile dei due strumenti nel tempo,
+# 2015-2026? Dati da D1 già caricati, nessun fetch Dukascopy nuovo,
+# nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  analyze-adx-threshold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Esegui analisi soglia ADX
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_adx_threshold_dax_vs_ftse.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adx-threshold-dax-ftse-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
