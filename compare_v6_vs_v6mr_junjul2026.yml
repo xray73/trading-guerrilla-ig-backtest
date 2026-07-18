@@ -1,0 +1,36 @@
+name: Confronto V6 pura vs V6+MR (giugno-luglio 2026)
+
+# Test ad-hoc su dati mai visti nei backtest ufficiali (fuori dai 5
+# periodi storici standard). Nessuna scrittura su D1, nessun impatto
+# sul motore live.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui confronto
+        run: python compare_v6_vs_v6mr_junjul2026.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-v6-v6mr-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
