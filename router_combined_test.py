@@ -51,13 +51,59 @@ def fetch_bars(symbol_const, start: datetime, end: datetime) -> pd.DataFrame:
 def metrics_summary(trades_df: pd.DataFrame) -> dict:
     n = len(trades_df)
     if n == 0:
-        return {"n_trades": 0, "win_rate_pct": np.nan, "profit_factor": np.nan, "pnl_total": 0.0}
+        return {"n_trades": 0, "win_rate_pct": np.nan, "profit_factor": np.nan, "pnl_total": 0.0,
+                "max_dd_pct": np.nan, "max_dd_eur": np.nan}
     wins = trades_df[trades_df["pnl"] > 0]
     losses = trades_df[trades_df["pnl"] <= 0]
     sum_wins, sum_losses = wins["pnl"].sum(), losses["pnl"].sum()
     pf = sum_wins / abs(sum_losses) if sum_losses != 0 else np.inf
+
+    dd_pct, dd_eur = compute_drawdown(trades_df, CAPITAL0)
+
     return {"n_trades": n, "win_rate_pct": 100 * len(wins) / n,
-            "profit_factor": pf, "pnl_total": trades_df["pnl"].sum()}
+            "profit_factor": pf, "pnl_total": trades_df["pnl"].sum(),
+            "max_dd_pct": dd_pct, "max_dd_eur": dd_eur}
+
+
+def compute_combined_wealth_drawdown(trades_a: pd.DataFrame, trades_b: pd.DataFrame, capital0_each: float) -> tuple[float, float]:
+    """Per lo scenario SEPARATI: patrimonio totale = capitale_v6 +
+    capitale_mr nel tempo (due pool indipendenti sommati), per un
+    confronto equo del drawdown contro lo scenario combinato (un solo
+    pool). Unisce gli eventi di chiusura di entrambi i motori in
+    ordine cronologico e traccia il patrimonio totale ad ogni passo."""
+    events = []
+    for _, t in trades_a.iterrows():
+        events.append((pd.Timestamp(t["exit_time"]), "a", t["pnl"]))
+    for _, t in trades_b.iterrows():
+        events.append((pd.Timestamp(t["exit_time"]), "b", t["pnl"]))
+    events.sort(key=lambda e: e[0])
+
+    cap_a, cap_b = capital0_each, capital0_each
+    totals = []
+    for _, which, pnl in events:
+        if which == "a":
+            cap_a += pnl
+        else:
+            cap_b += pnl
+        totals.append(cap_a + cap_b)
+
+    if not totals:
+        return 0.0, 0.0
+    totals = pd.Series(totals)
+    running_max = totals.cummax()
+    dd_eur = totals - running_max
+    dd_pct = dd_eur / running_max
+    return dd_pct.min() * 100, dd_eur.min()
+    """Drawdown sull'equity curve ricostruita in ordine di uscita
+    (exit_time) — coerente con quando il PnL si realizza davvero."""
+    if trades_df.empty:
+        return 0.0, 0.0
+    trades_sorted = trades_df.sort_values("exit_time")
+    equity = capital0 + trades_sorted["pnl"].cumsum()
+    running_max = equity.cummax()
+    dd_eur = equity - running_max
+    dd_pct = dd_eur / running_max
+    return dd_pct.min() * 100, dd_eur.min()
 
 
 def main():
@@ -88,14 +134,17 @@ def main():
     m_mr = metrics_summary(trades_mr)
     separated_total_pnl = m_v6["pnl_total"] + m_mr["pnl_total"]
     separated_total_capital_used = CAPITAL0 * 2  # due pool indipendenti
+    separated_wealth_dd_pct, separated_wealth_dd_eur = compute_combined_wealth_drawdown(trades_v6, trades_mr, CAPITAL0)
 
     print("--- SEPARATI (due capitali indipendenti da 2.000 EUR ciascuno) ---")
     print(f"  V6:              n={m_v6['n_trades']} WR={m_v6['win_rate_pct']:.1f}% "
-          f"PF={m_v6['profit_factor']:.2f} PnL={m_v6['pnl_total']:+.2f}")
+          f"PF={m_v6['profit_factor']:.2f} PnL={m_v6['pnl_total']:+.2f} MaxDD={m_v6['max_dd_pct']:.1f}%")
     print(f"  Mean-reversion:  n={m_mr['n_trades']} WR={m_mr['win_rate_pct']:.1f}% "
-          f"PF={m_mr['profit_factor']:.2f} PnL={m_mr['pnl_total']:+.2f}")
+          f"PF={m_mr['profit_factor']:.2f} PnL={m_mr['pnl_total']:+.2f} MaxDD={m_mr['max_dd_pct']:.1f}%")
     print(f"  PnL combinato:   {separated_total_pnl:+.2f} EUR su {separated_total_capital_used:.0f} EUR investiti "
-          f"({100*separated_total_pnl/separated_total_capital_used:+.1f}%)\n")
+          f"({100*separated_total_pnl/separated_total_capital_used:+.1f}%)")
+    print(f"  MaxDD patrimonio totale (V6+MR sommati nel tempo): {separated_wealth_dd_pct:.1f}% "
+          f"({separated_wealth_dd_eur:.0f} EUR)\n")
 
     # --- COMBINATI: un motore, un capitale, router condiviso ---
     combined_signal_data = {name: generate_combined_signals(raw_data[name], eng.INSTRUMENTS[name], mr_mode=MR_MODE)
@@ -109,11 +158,13 @@ def main():
     print("--- COMBINATI (un solo capitale da 2.000 EUR, router condiviso) ---")
     print(f"  n={m_combined['n_trades']} WR={m_combined['win_rate_pct']:.1f}% "
           f"PF={m_combined['profit_factor']:.2f} PnL={m_combined['pnl_total']:+.2f} "
-          f"({100*m_combined['pnl_total']/CAPITAL0:+.1f}% su {CAPITAL0:.0f} EUR)\n")
+          f"({100*m_combined['pnl_total']/CAPITAL0:+.1f}% su {CAPITAL0:.0f} EUR) "
+          f"MaxDD={m_combined['max_dd_pct']:.1f}%\n")
 
     print("--- Confronto sintetico ---")
     print(f"  Rendimento % su capitale investito: separati {100*separated_total_pnl/separated_total_capital_used:+.1f}%  "
           f"vs combinati {100*m_combined['pnl_total']/CAPITAL0:+.1f}%")
+    print(f"  MaxDD patrimonio totale: separati {separated_wealth_dd_pct:.1f}%  vs combinati {m_combined['max_dd_pct']:.1f}%")
     print(f"  N trade totali: separati {m_v6['n_trades'] + m_mr['n_trades']}  vs combinati {m_combined['n_trades']}")
     print(f"  (Un N trade combinati molto piu' basso della somma indica che il router ha dovuto "
           f"scartare segnali per limite slot/ordini condivisi — competizione reale per il capitale.)")
