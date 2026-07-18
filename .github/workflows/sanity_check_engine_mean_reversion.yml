@@ -1,0 +1,43 @@
+name: Sanity Check Engine Mean Reversion
+
+# Obbligatorio prima di considerare definitivo engine_mean_reversion.py
+# (stesso protocollo già applicato a BacktestEngineFloatingKillSwitch):
+# Check A - equivalenza a parametri neutri col motore madre.
+# Check B - comportamento della singola differenza intenzionale (salta vs forza).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  sanity-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Sanity check
+        run: python sanity_check_engine_mean_reversion.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanity-check-mr-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
