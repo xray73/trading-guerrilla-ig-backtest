@@ -1,0 +1,28 @@
+name: Mean Reversion Missed Signal Check (diagnostica ad-hoc 18/07/2026)
+
+# Verifica se lo zero-segnali del 16-17/07 sia spiegato dall'assenza della
+# mean-reversion dal ciclo live (non ancora integrata) — mostra quali
+# segnali/trade sarebbero arrivati con Bollinger/RSI in isolamento.
+# Nessuna scrittura su D1, solo lettura Dukascopy + simulazione locale.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  missed-signal-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Check segnali mean-reversion mancati
+        run: python mean_reversion_missed_signal_check.py
