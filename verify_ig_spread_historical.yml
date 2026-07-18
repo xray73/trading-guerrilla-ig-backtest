@@ -1,0 +1,35 @@
+name: Verify IG Spread Historical
+
+# Stima lo spread reale IG usando dati storici bid/ask (decine di
+# barre in una sola chiamata, invece di uno snapshot live per
+# esecuzione). NON sostituisce verify_ig_spread.py per lo storico dei
+# 5 periodi di backtest (quello non è recuperabile) — serve solo a
+# calibrare meglio spread_fixed da qui in avanti.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify-spread-historical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install requests
+
+      - name: Stima spread storica
+        env:
+          IG_API_KEY: ${{ secrets.TRADING_GUERRILLA_DEMO }}
+          IG_DEMO_USERNAME: ${{ secrets.IG_DEMO_USERNAME }}
+          IG_DEMO_PASSWORD: ${{ secrets.ID_DEMO_PASSWORD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python verify_ig_spread_historical.py
