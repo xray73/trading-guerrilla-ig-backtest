@@ -1,0 +1,33 @@
+name: Capital Split Test (proporzioni V6/MeanReversion, capitale reale 2000EUR)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  capital-split:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui test split capitale
+        run: python capital_split_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capital-split-${{ github.run_id }}
+          path: capital_split_results.csv
+          retention-days: 30
+          if-no-files-found: warn
