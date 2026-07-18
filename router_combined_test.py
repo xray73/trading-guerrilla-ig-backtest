@@ -94,6 +94,9 @@ def compute_combined_wealth_drawdown(trades_a: pd.DataFrame, trades_b: pd.DataFr
     dd_eur = totals - running_max
     dd_pct = dd_eur / running_max
     return dd_pct.min() * 100, dd_eur.min()
+
+
+def compute_drawdown(trades_df: pd.DataFrame, capital0: float) -> tuple[float, float]:
     """Drawdown sull'equity curve ricostruita in ordine di uscita
     (exit_time) — coerente con quando il PnL si realizza davvero."""
     if trades_df.empty:
