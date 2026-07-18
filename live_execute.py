@@ -1,30 +1,58 @@
 """
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
-Sostituisce live_signal_check.py come script eseguito dal cron una
-volta testato (per ora resta un file separato, non sovrascrive quello
-esistente).
+
+AGGIORNAMENTO 18/07/2026 — INTEGRAZIONE MEAN-REVERSION:
+Il ciclo ora gestisce DUE strategie indipendenti, ciascuna col proprio
+sotto-pool di capitale (split FISSO 70% V6 / 30% mean-reversion,
+deciso su 2.000€ reali — 1.400€/600€ iniziali):
+
+  - V6 (esistente, invariata): segnale eng.generate_signals(), forza
+    la size al minimo se sotto soglia (comportamento già validato).
+  - Mean-reversion (nuova): segnale generate_mean_reversion_signals()
+    variante RSI (selezionata dopo confronto con Bollinger, vedi RCA),
+    SALTA il trade se il rischio calcolato non copre la size minima
+    (stessa logica di engine_mean_reversion.py, replicata qui perché
+    live_execute.py non usa la classe BacktestEngine — calcola la size
+    manualmente).
+
+I due pool sono trattati come conti virtuali COMPLETAMENTE indipendenti:
+slot concorrenti (max 2) e ordini/giorno (max 3) separati per pool, non
+condivisi — stessa filosofia per cui il router combinato (capitale
+condiviso) è stato scartato in fase di backtest per il drawdown peggiore.
+V6 e mean-reversion POSSONO avere posizioni aperte sullo stesso
+strumento contemporaneamente (es. DAX long da V6 + DAX short da MR) —
+conseguenza diretta della separazione di capitale, già implicita nei
+backtest di split (due motori indipendenti sugli stessi dati).
+
+Accantonamento: rimane un meccanismo UNICO sul capitale COMBINATO
+(capital_current_v6 + capital_current_mr) — sul conto IG reale esiste
+un solo saldo, i due pool sono solo contabilità interna per il sizing.
+Quando scatta il consolidamento mensile, entrambi i pool vengono
+ridotti in proporzione al loro peso corrente (non forzati a tornare
+70/30 — lo split è fisso solo all'origine).
+
+Kill switch giornaliero: SEPARATO per pool (decisione esplicita
+18/07/2026) — ogni pool si blocca in base alla propria perdita %
+giornaliera, non al portafoglio totale.
+
+NOTA — gap preesistente, non introdotto qui: il campo
+kill_switch_triggered (e ora kill_switch_triggered_v6/_mr) viene letto
+ma non risulta calcolato da nessuna parte nel codice esistente (nessun
+controllo di perdita % giornaliera implementato). Segnalato, non
+risolto in questo aggiornamento per non allargare lo scope — la
+struttura dati è pronta per quando verrà aggiunto.
 
 DRY_RUN=True di default (variabile d'ambiente DRY_RUN, default "true")
 — nessun ordine reale finché non viene impostata esplicitamente a
-"false". Misura di sicurezza intenzionale, stessa logica di
-ig_client.place_order/close_position.
+"false". Invariato dalla versione precedente.
 
 Ciclo ad ogni esecuzione (pensato per girare via cron ogni 30min):
-  1. Gestisce le posizioni aperte: legge il prezzo corrente da IG,
-     controlla se stop/target sono stati toccati o se il max holding
-     è scaduto, chiude su IG se serve, aggiorna live_positions/
-     live_trades/live_daily_state.capital_current.
-  2. Rileva nuovi segnali (stessa logica di live_signal_check.py),
-     calcola il size usando capital_current (che riflette
-     l'accantonamento — l'accantonato è già fuori da questo numero),
-     invia l'ordine a IG (o lo simula in dry_run), registra la
-     posizione aperta.
-
-Sizing: stessa formula del motore (_position_size in engine.py) —
-risk_amount = capital_current * risk_pct, size = risk_amount /
-(stop_distance_in_punti * point_value), forzato al minimo se sotto
-soglia. Nessuna divergenza dalla logica già validata nel backtest.
+  1. Gestisce le posizioni aperte (V6 + MR indistintamente, la logica
+     di chiusura è identica — cambia solo verso quale pool instradare
+     il PnL, letto dal campo `strategy` della posizione).
+  2. Rileva nuovi segnali V6 (logica invariata).
+  3. Rileva nuovi segnali mean-reversion RSI (logica nuova, skip-vs-force).
 """
 
 from __future__ import annotations
@@ -38,10 +66,14 @@ import dukascopy_python
 from dukascopy_python.instruments import INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100
 
 import engine as eng
+from mean_reversion_signals import generate_mean_reversion_signals
 from ig_client import IGSession, load_credentials_from_env
 
 WARMUP_DAYS = 90
 CAPITAL0_DEFAULT = 2000.0
+SPLIT_V6_PCT = 0.70
+SPLIT_MR_PCT = 0.30
+MR_MODE = "rsi"  # variante selezionata, vedi RCA Addendum 17-18/07/2026 sez. 45
 SYMBOLS = {"DAX": INSTRUMENT_IDX_EUROPE_E_DAAX, "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100}
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
@@ -78,36 +110,55 @@ THRESHOLD_MULT = 1.5
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
+    """Accantonamento su capitale COMBINATO (v6+mr) — decisione esplicita
+    18/07/2026: sul conto IG reale esiste un solo saldo, i due pool sono
+    solo contabilità interna per il sizing. Quando scatta, i due pool
+    vengono ridotti in proporzione al loro peso corrente (split fisso
+    solo all'origine, non forzato a restare 70/30 nel tempo)."""
+    capital_v6 = prev_state.get("capital_current_v6")
+    capital_mr = prev_state.get("capital_current_mr")
+    if capital_v6 is None or capital_mr is None:
+        # riga legacy pre-migrazione: split dal capitale combinato secondo lo split iniziale
+        legacy_capital = prev_state["capital_current"]
+        capital_v6 = legacy_capital * SPLIT_V6_PCT
+        capital_mr = legacy_capital * SPLIT_MR_PCT
+
     if not prev_state.get("accantonamento_attivo", 1):
+        combined = capital_v6 + capital_mr
         return {
-            "capital": prev_state["capital_current"],
+            "capital_v6": capital_v6, "capital_mr": capital_mr,
             "accantonato": prev_state.get("accantonato", 0.0) or 0.0,
-            "reference": prev_state.get("consolidamento_reference") or prev_state["capital_current"],
-            "threshold": prev_state.get("consolidamento_threshold") or prev_state["capital_current"] * THRESHOLD_MULT,
+            "reference": prev_state.get("consolidamento_reference") or combined,
+            "threshold": prev_state.get("consolidamento_threshold") or combined * THRESHOLD_MULT,
         }
 
-    capital = prev_state["capital_current"]
     accantonato = prev_state.get("accantonato", 0.0) or 0.0
-    reference = prev_state.get("consolidamento_reference") or capital
+    combined = capital_v6 + capital_mr
+    reference = prev_state.get("consolidamento_reference") or combined
     threshold = prev_state.get("consolidamento_threshold") or (reference * THRESHOLD_MULT)
 
     prev_month = prev_state["trade_date"][:7]
     this_month = today_str[:7]
 
     if this_month != prev_month:
-        while capital > threshold:
-            gain = capital - reference
+        while combined > threshold:
+            gain = combined - reference
             consolidated = CONSOLIDATE_PCT * gain
             if consolidated <= 0:
                 break
+            reduction_fraction = consolidated / combined
+            capital_v6 -= capital_v6 * reduction_fraction
+            capital_mr -= capital_mr * reduction_fraction
             accantonato += consolidated
-            capital -= consolidated
-            reference = capital
+            combined = capital_v6 + capital_mr
+            reference = combined
             threshold = reference * THRESHOLD_MULT
             print(f"[accantonamento] Consolidati {consolidated:.2f} EUR al cambio mese "
-                  f"({prev_month} -> {this_month}). Investito: {capital:.2f}  Accantonato: {accantonato:.2f}")
+                  f"({prev_month} -> {this_month}). Investito totale: {combined:.2f} "
+                  f"(V6={capital_v6:.2f} MR={capital_mr:.2f})  Accantonato: {accantonato:.2f}")
 
-    return {"capital": capital, "accantonato": accantonato, "reference": reference, "threshold": threshold}
+    return {"capital_v6": capital_v6, "capital_mr": capital_mr,
+            "accantonato": accantonato, "reference": reference, "threshold": threshold}
 
 
 def get_or_create_today_state(today_str: str) -> dict:
@@ -119,36 +170,38 @@ def get_or_create_today_state(today_str: str) -> dict:
 
     if prev_rows:
         updated = apply_monthly_consolidation_if_needed(today_str, prev_rows[0])
-        starting_capital = updated["capital"]
+        start_v6, start_mr = updated["capital_v6"], updated["capital_mr"]
         starting_accantonato = updated["accantonato"]
-        reference = updated["reference"]
-        threshold = updated["threshold"]
+        reference, threshold = updated["reference"], updated["threshold"]
     else:
-        starting_capital = CAPITAL0_DEFAULT
+        start_v6 = CAPITAL0_DEFAULT * SPLIT_V6_PCT
+        start_mr = CAPITAL0_DEFAULT * SPLIT_MR_PCT
         starting_accantonato = 0.0
         reference = CAPITAL0_DEFAULT
         threshold = CAPITAL0_DEFAULT * THRESHOLD_MULT
 
+    combined = start_v6 + start_mr
     d1_query(
         "INSERT INTO live_daily_state "
-        "(trade_date, account_type, capital_start_of_day, capital_current, accantonato, "
-        "consolidamento_reference, consolidamento_threshold, accantonamento_attivo) "
-        f"VALUES ('{today_str}', 'demo', {starting_capital}, {starting_capital}, {starting_accantonato}, "
-        f"{reference}, {threshold}, 1)"
+        "(trade_date, account_type, capital_start_of_day, capital_current, "
+        "capital_start_of_day_v6, capital_current_v6, capital_start_of_day_mr, capital_current_mr, "
+        "accantonato, consolidamento_reference, consolidamento_threshold, accantonamento_attivo) "
+        f"VALUES ('{today_str}', 'demo', {combined}, {combined}, "
+        f"{start_v6}, {start_v6}, {start_mr}, {start_mr}, "
+        f"{starting_accantonato}, {reference}, {threshold}, 1)"
     )
     print(f"Creato nuovo record live_daily_state per {today_str}: "
-          f"investito={starting_capital:.2f} EUR, accantonato={starting_accantonato:.2f} EUR")
+          f"V6={start_v6:.2f} EUR, MR={start_mr:.2f} EUR, accantonato={starting_accantonato:.2f} EUR")
     return {
         "trade_date": today_str, "account_type": "demo",
-        "capital_start_of_day": starting_capital, "capital_current": starting_capital,
-        "accantonato": starting_accantonato, "orders_today": 0, "kill_switch_triggered": 0,
+        "capital_current_v6": start_v6, "capital_current_mr": start_mr,
+        "accantonato": starting_accantonato,
+        "orders_today_v6": 0, "orders_today_mr": 0,
+        "kill_switch_triggered_v6": 0, "kill_switch_triggered_mr": 0,
     }
 
 
 def get_today_state(today_str: str) -> dict:
-    """Mantenuto per compatibilità interna — ora delega alla versione
-    che crea lo stato se manca, così live_execute.py è autosufficiente
-    e non dipende dall'aver lanciato live_signal_check.py prima."""
     return get_or_create_today_state(today_str)
 
 
@@ -159,18 +212,19 @@ def manage_open_positions(session: IGSession, today_str: str):
         return
 
     day_state = get_today_state(today_str)
-    capital = day_state["capital_current"]
+    capital_v6 = day_state["capital_current_v6"]
+    capital_mr = day_state["capital_current_mr"]
 
     for pos in open_positions:
         try:
             price = session.get_price(pos["instrument"])
         except Exception as e:
-            print(f"  [{pos['instrument']}] impossibile leggere il prezzo ({e}), salto.")
+            print(f"  [{pos['instrument']}/{pos['strategy']}] impossibile leggere il prezzo ({e}), salto.")
             continue
 
         current_price = price["bid"] if pos["direction"] == "long" else price["offer"]
         if current_price is None:
-            print(f"  [{pos['instrument']}] prezzo non disponibile, salto.")
+            print(f"  [{pos['instrument']}/{pos['strategy']}] prezzo non disponibile, salto.")
             continue
 
         exit_reason = None
@@ -192,11 +246,11 @@ def manage_open_positions(session: IGSession, today_str: str):
             exit_reason = "max_holding"
 
         if exit_reason is None:
-            print(f"  [{pos['instrument']}] posizione ancora aperta, nessuna condizione di uscita.")
+            print(f"  [{pos['instrument']}/{pos['strategy']}] posizione ancora aperta, nessuna condizione di uscita.")
             continue
 
         close_direction = "SELL" if pos["direction"] == "long" else "BUY"
-        print(f"  [{pos['instrument']}] condizione di uscita: {exit_reason} — chiudo (dry_run={DRY_RUN})")
+        print(f"  [{pos['instrument']}/{pos['strategy']}] condizione di uscita: {exit_reason} — chiudo (dry_run={DRY_RUN})")
         result = session.close_position(
             deal_id=pos["ig_deal_id"] or "SIMULATA", direction=close_direction,
             size=pos["size"], dry_run=DRY_RUN,
@@ -211,43 +265,48 @@ def manage_open_positions(session: IGSession, today_str: str):
         d1_query(
             "INSERT INTO live_trades (account_type, position_id, instrument, direction, entry_time, "
             "entry_price, exit_time, exit_price, stop_loss, take_profit, atr_at_entry, size, "
-            "risk_amount, pnl, exit_reason, causa_esito, rispetto_regole) VALUES ("
+            "risk_amount, pnl, exit_reason, causa_esito, rispetto_regole, strategy) VALUES ("
             f"'demo', {pos['id']}, '{pos['instrument']}', '{pos['direction']}', '{pos['entry_time']}', "
             f"{pos['entry_price']}, '{datetime.now(timezone.utc).isoformat()}', {current_price}, "
             f"{pos['stop_loss']}, {pos['take_profit']}, {pos.get('atr_at_entry', 'NULL')}, {pos['size']}, "
             f"{pos['risk_amount']}, {pnl}, '{exit_reason}', "
-            f"'{'falso segnale' if exit_reason == 'stop_loss' and pnl < 0 else 'NULL'}', 'si')"
+            f"'{'falso segnale' if exit_reason == 'stop_loss' and pnl < 0 else 'NULL'}', 'si', '{pos['strategy']}')"
         )
-        capital += pnl
-        d1_query(f"UPDATE live_daily_state SET capital_current = {capital} WHERE trade_date = '{today_str}'")
-        print(f"  [{pos['instrument']}] chiusa: pnl={pnl:+.2f} EUR, nuovo capitale investito={capital:.2f} EUR")
+
+        if pos["strategy"] == "mean_reversion":
+            capital_mr += pnl
+            d1_query(f"UPDATE live_daily_state SET capital_current_mr = {capital_mr} WHERE trade_date = '{today_str}'")
+        else:
+            capital_v6 += pnl
+            d1_query(f"UPDATE live_daily_state SET capital_current_v6 = {capital_v6} WHERE trade_date = '{today_str}'")
+
+        print(f"  [{pos['instrument']}/{pos['strategy']}] chiusa: pnl={pnl:+.2f} EUR, "
+              f"nuovo capitale pool {pos['strategy']}={(capital_mr if pos['strategy']=='mean_reversion' else capital_v6):.2f} EUR")
 
 
-def detect_and_open_signals(session: IGSession, today_str: str):
+def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: dict):
     day_state = get_today_state(today_str)
-    if day_state["kill_switch_triggered"]:
-        print("Kill switch attivo oggi — nessun nuovo ordine.")
+    if day_state.get("kill_switch_triggered_v6"):
+        print("[V6] Kill switch attivo oggi — nessun nuovo ordine.")
         return
-    if day_state["orders_today"] >= eng.PARAMS.max_new_orders_per_day:
-        print("Limite ordini/giorno raggiunto — nessun nuovo ordine.")
+    if (day_state.get("orders_today_v6") or 0) >= eng.PARAMS.max_new_orders_per_day:
+        print("[V6] Limite ordini/giorno raggiunto — nessun nuovo ordine.")
         return
 
-    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open'")
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'v6'")
     if len(open_positions) >= eng.PARAMS.max_concurrent_positions:
-        print("Nessuno slot concorrente libero — nessun nuovo ordine.")
+        print("[V6] Nessuno slot concorrente libero — nessun nuovo ordine.")
         return
     open_instruments = {p["instrument"] for p in open_positions}
 
     now = datetime.now(timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    warmup_start = day_start - timedelta(days=WARMUP_DAYS)
-    capital = day_state["capital_current"]
+    capital = day_state["capital_current_v6"]
 
-    for name, const in SYMBOLS.items():
+    for name in SYMBOLS:
         if name in open_instruments:
             continue
         inst = eng.INSTRUMENTS[name]
-        hist = fetch_historical(const, warmup_start, now + timedelta(minutes=30))
+        hist = hist_cache[name]
         signals = eng.generate_signals(hist, inst)
         closed = signals[signals["timestamp"] + timedelta(minutes=30) <= now]
         if closed.empty:
@@ -255,22 +314,22 @@ def detect_and_open_signals(session: IGSession, today_str: str):
         last_closed = closed.iloc[-1]
         sig = last_closed["signal"]
         if sig not in ("long", "short"):
-            print(f"  [{name}] nessun segnale.")
+            print(f"  [V6/{name}] nessun segnale.")
             continue
 
         atr = last_closed["atr"]
         if pd.isna(atr):
-            print(f"  [{name}] ATR non disponibile, salto.")
+            print(f"  [V6/{name}] ATR non disponibile, salto.")
             continue
 
         try:
             price = session.get_price(name)
         except Exception as e:
-            print(f"  [{name}] impossibile leggere il prezzo per l'ordine ({e}), salto.")
+            print(f"  [V6/{name}] impossibile leggere il prezzo per l'ordine ({e}), salto.")
             continue
         entry_price = price["offer"] if sig == "long" else price["bid"]
         if entry_price is None:
-            print(f"  [{name}] prezzo non disponibile, salto.")
+            print(f"  [V6/{name}] prezzo non disponibile, salto.")
             continue
 
         stop_distance_pts = atr * inst.atr_multiplier
@@ -283,7 +342,7 @@ def detect_and_open_signals(session: IGSession, today_str: str):
             forced_min = True
 
         direction = "BUY" if sig == "long" else "SELL"
-        print(f"  [{name}] segnale {sig.upper()} — size={size:.2f} "
+        print(f"  [V6/{name}] segnale {sig.upper()} — size={size:.2f} "
               f"(forzata al minimo={forced_min}) stop={stop_distance_pts:.1f}pt "
               f"target={limit_distance_pts:.1f}pt (dry_run={DRY_RUN})")
 
@@ -303,15 +362,111 @@ def detect_and_open_signals(session: IGSession, today_str: str):
         d1_query(
             "INSERT INTO live_positions (account_type, instrument, direction, status, entry_time, "
             "entry_price, stop_loss, take_profit, size, risk_amount, atr_at_entry, "
-            "max_holding_bars, ig_deal_id) VALUES ("
+            "max_holding_bars, ig_deal_id, strategy) VALUES ("
             f"'demo', '{name}', '{sig}', 'open', '{now.isoformat()}', {entry_price}, "
             f"{stop_loss}, {take_profit}, {size}, {risk_amount}, {atr}, "
-            f"{eng.PARAMS.max_holding_bars}, '{deal_id}')"
+            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'v6')"
         )
         d1_query(
-            f"UPDATE live_daily_state SET orders_today = orders_today + 1 WHERE trade_date = '{today_str}'"
+            f"UPDATE live_daily_state SET orders_today_v6 = orders_today_v6 + 1 WHERE trade_date = '{today_str}'"
         )
-        print(f"    Posizione aperta su IG, deal_id={deal_id}")
+        print(f"    Posizione V6 aperta su IG, deal_id={deal_id}")
+
+
+def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: dict):
+    """Identica a detect_and_open_signals_v6 nella struttura, con due
+    differenze intenzionali: segnale generate_mean_reversion_signals()
+    variante RSI, e size che SALTA (non forza) sotto il minimo —
+    replica qui la stessa logica di engine_mean_reversion.py, che non
+    può essere riusata direttamente perché live_execute.py non usa la
+    classe BacktestEngine per il sizing (calcolo manuale, come V6)."""
+    day_state = get_today_state(today_str)
+    if day_state.get("kill_switch_triggered_mr"):
+        print("[MR] Kill switch attivo oggi — nessun nuovo ordine.")
+        return
+    if (day_state.get("orders_today_mr") or 0) >= eng.PARAMS.max_new_orders_per_day:
+        print("[MR] Limite ordini/giorno raggiunto — nessun nuovo ordine.")
+        return
+
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'mean_reversion'")
+    if len(open_positions) >= eng.PARAMS.max_concurrent_positions:
+        print("[MR] Nessuno slot concorrente libero — nessun nuovo ordine.")
+        return
+    open_instruments = {p["instrument"] for p in open_positions}
+
+    now = datetime.now(timezone.utc)
+    capital = day_state["capital_current_mr"]
+
+    for name in SYMBOLS:
+        if name in open_instruments:
+            continue
+        inst = eng.INSTRUMENTS[name]
+        hist = hist_cache[name]
+        signals = generate_mean_reversion_signals(hist, inst, mode=MR_MODE)
+        closed = signals[signals["timestamp"] + timedelta(minutes=30) <= now]
+        if closed.empty:
+            continue
+        last_closed = closed.iloc[-1]
+        sig = last_closed["signal"]
+        if sig not in ("long", "short"):
+            print(f"  [MR/{name}] nessun segnale.")
+            continue
+
+        atr = last_closed["atr"]
+        if pd.isna(atr):
+            print(f"  [MR/{name}] ATR non disponibile, salto.")
+            continue
+
+        try:
+            price = session.get_price(name)
+        except Exception as e:
+            print(f"  [MR/{name}] impossibile leggere il prezzo per l'ordine ({e}), salto.")
+            continue
+        entry_price = price["offer"] if sig == "long" else price["bid"]
+        if entry_price is None:
+            print(f"  [MR/{name}] prezzo non disponibile, salto.")
+            continue
+
+        stop_distance_pts = atr * inst.atr_multiplier
+        limit_distance_pts = stop_distance_pts * eng.PARAMS.rr_target
+        risk_amount = capital * inst.risk_pct
+        size = risk_amount / (stop_distance_pts * inst.point_value)
+
+        if size < inst.min_tradable_size:
+            print(f"  [MR/{name}] segnale {sig.upper()} SALTATO — size calcolata {size:.3f} "
+                  f"sotto il minimo {inst.min_tradable_size} (capitale pool MR={capital:.2f} EUR "
+                  f"insufficiente per questo ATR). Comportamento intenzionale, vedi engine_mean_reversion.py.")
+            continue
+
+        direction = "BUY" if sig == "long" else "SELL"
+        print(f"  [MR/{name}] segnale {sig.upper()} — size={size:.2f} "
+              f"stop={stop_distance_pts:.1f}pt target={limit_distance_pts:.1f}pt (dry_run={DRY_RUN})")
+
+        result = session.place_order(
+            instrument=name, direction=direction, size=size,
+            stop_distance=stop_distance_pts, limit_distance=limit_distance_pts, dry_run=DRY_RUN,
+        )
+
+        if DRY_RUN:
+            print(f"    Simulato, nessuna scrittura in live_positions (solo in modalità reale).")
+            continue
+
+        deal_id = result.get("dealId", "")
+        stop_loss = entry_price - stop_distance_pts if sig == "long" else entry_price + stop_distance_pts
+        take_profit = entry_price + limit_distance_pts if sig == "long" else entry_price - limit_distance_pts
+
+        d1_query(
+            "INSERT INTO live_positions (account_type, instrument, direction, status, entry_time, "
+            "entry_price, stop_loss, take_profit, size, risk_amount, atr_at_entry, "
+            "max_holding_bars, ig_deal_id, strategy) VALUES ("
+            f"'demo', '{name}', '{sig}', 'open', '{now.isoformat()}', {entry_price}, "
+            f"{stop_loss}, {take_profit}, {size}, {risk_amount}, {atr}, "
+            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'mean_reversion')"
+        )
+        d1_query(
+            f"UPDATE live_daily_state SET orders_today_mr = orders_today_mr + 1 WHERE trade_date = '{today_str}'"
+        )
+        print(f"    Posizione MR aperta su IG, deal_id={deal_id}")
 
 
 def main():
@@ -324,11 +479,23 @@ def main():
 
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
-        print("--- 1) Gestione posizioni aperte ---")
+        print("--- 1) Gestione posizioni aperte (V6 + MR) ---")
         manage_open_positions(session, today_str)
 
-        print("\n--- 2) Rilevazione nuovi segnali ---")
-        detect_and_open_signals(session, today_str)
+        # un solo fetch Dukascopy per strumento, riusato da V6 e MR
+        print("\n--- 2) Scarico storico (riusato da entrambe le strategie) ---")
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        warmup_start = day_start - timedelta(days=WARMUP_DAYS)
+        hist_cache = {}
+        for name, const in SYMBOLS.items():
+            hist_cache[name] = fetch_historical(const, warmup_start, now + timedelta(minutes=30))
+
+        print("\n--- 3) Rilevazione nuovi segnali V6 ---")
+        detect_and_open_signals_v6(session, today_str, hist_cache)
+
+        print("\n--- 4) Rilevazione nuovi segnali mean-reversion (RSI) ---")
+        detect_and_open_signals_mr(session, today_str, hist_cache)
 
     print("\n=== Completato. ===")
 
