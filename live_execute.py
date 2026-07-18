@@ -32,16 +32,24 @@ Quando scatta il consolidamento mensile, entrambi i pool vengono
 ridotti in proporzione al loro peso corrente (non forzati a tornare
 70/30 — lo split è fisso solo all'origine).
 
-Kill switch giornaliero: SEPARATO per pool (decisione esplicita
-18/07/2026) — ogni pool si blocca in base alla propria perdita %
-giornaliera, non al portafoglio totale.
+AGGIORNAMENTO 18/07/2026 (2) — KILL SWITCH GIORNALIERO IMPLEMENTATO:
+Fino a questa versione, kill_switch_triggered_v6/mr veniva letto ma
+MAI calcolato (gap preesistente, segnalato in una sessione precedente
+e ora risolto). Nuova funzione check_and_apply_kill_switches():
+SEPARATO per pool (decisione esplicita 18/07/2026) — calcola perdita
+realizzata+floating rispetto al capitale di inizio giornata di
+ciascun pool; se supera kill_switch_threshold_pct (default -4%),
+blocca SOLO nuovi ordini per quel pool per il resto della giornata.
+Le posizioni già aperte NON vengono mai chiuse forzatamente — stessa
+scelta esplicita già validata in backtest per
+BacktestEngineFloatingKillSwitch (una chiusura forzata taglierebbe
+anche trade che potrebbero recuperare prima del proprio stop). Chiamata
+in main() subito dopo manage_open_positions() e prima della ricerca
+di nuovi segnali, così il PnL realizzato del ciclo è già aggiornato.
 
-NOTA — gap preesistente, non introdotto qui: il campo
-kill_switch_triggered (e ora kill_switch_triggered_v6/_mr) viene letto
-ma non risulta calcolato da nessuna parte nel codice esistente (nessun
-controllo di perdita % giornaliera implementato). Segnalato, non
-risolto in questo aggiornamento per non allargare lo scope — la
-struttura dati è pronta per quando verrà aggiunto.
+LIMITE NOTO (identico al backtest): il check avviene una volta per
+ciclo (~30 min), non istante per istante — un affondo temporaneo che
+rientra prima del prossimo ciclo non viene visto.
 
 DRY_RUN=True di default (variabile d'ambiente DRY_RUN, default "true")
 — nessun ordine reale finché non viene impostata esplicitamente a
@@ -51,8 +59,10 @@ Ciclo ad ogni esecuzione (pensato per girare via cron ogni 30min):
   1. Gestisce le posizioni aperte (V6 + MR indistintamente, la logica
      di chiusura è identica — cambia solo verso quale pool instradare
      il PnL, letto dal campo `strategy` della posizione).
-  2. Rileva nuovi segnali V6 (logica invariata).
-  3. Rileva nuovi segnali mean-reversion RSI (logica nuova, skip-vs-force).
+  1b. Verifica kill switch giornaliero, separato per pool.
+  2. Rileva nuovi segnali V6 (logica invariata, ora blocca su
+     kill_switch_triggered_v6 realmente calcolato).
+  3. Rileva nuovi segnali mean-reversion RSI (idem per kill_switch_triggered_mr).
 """
 
 from __future__ import annotations
@@ -195,9 +205,11 @@ def get_or_create_today_state(today_str: str) -> dict:
     return {
         "trade_date": today_str, "account_type": "demo",
         "capital_current_v6": start_v6, "capital_current_mr": start_mr,
+        "capital_start_of_day_v6": start_v6, "capital_start_of_day_mr": start_mr,
         "accantonato": starting_accantonato,
         "orders_today_v6": 0, "orders_today_mr": 0,
         "kill_switch_triggered_v6": 0, "kill_switch_triggered_mr": 0,
+        "kill_switch_threshold_pct": -4.0,
     }
 
 
@@ -282,6 +294,84 @@ def manage_open_positions(session: IGSession, today_str: str):
 
         print(f"  [{pos['instrument']}/{pos['strategy']}] chiusa: pnl={pnl:+.2f} EUR, "
               f"nuovo capitale pool {pos['strategy']}={(capital_mr if pos['strategy']=='mean_reversion' else capital_v6):.2f} EUR")
+
+
+def check_and_apply_kill_switches(session: IGSession, today_str: str):
+    """Kill switch giornaliero, SEPARATO per pool (decisione esplicita
+    18/07/2026). Calcola perdita realizzata+floating rispetto al
+    capitale di inizio giornata di ciascun pool; se supera la soglia
+    (kill_switch_threshold_pct, default -4%), blocca SOLO nuovi ordini
+    per quel pool per il resto della giornata — le posizioni già aperte
+    restano gestite dai loro stop/target/max_holding normali, MAI
+    chiuse forzatamente (stessa scelta esplicita di
+    engine_floating_kill_switch.py in backtest: una chiusura forzata
+    taglierebbe anche trade che potrebbero recuperare prima del
+    proprio stop).
+
+    LIMITE NOTO (identico al backtest): il check avviene una volta per
+    ciclo (~30 min), non istante per istante — un affondo temporaneo
+    che rientra prima del prossimo ciclo non viene visto.
+    """
+    day_state = get_today_state(today_str)
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open'")
+    threshold_pct = abs(day_state.get("kill_switch_threshold_pct") or -4.0) / 100.0
+
+    instruments_needed = {p["instrument"] for p in open_positions}
+    price_cache = {}
+    for name in instruments_needed:
+        try:
+            price_cache[name] = session.get_price(name)
+        except Exception as e:
+            print(f"  [kill switch] impossibile leggere prezzo {name} ({e}) — "
+                  f"posizioni su questo strumento escluse dal calcolo floating questo ciclo.")
+
+    floating_by_strategy = {"v6": 0.0, "mean_reversion": 0.0}
+    for pos in open_positions:
+        price = price_cache.get(pos["instrument"])
+        if price is None:
+            continue
+        current_price = price["bid"] if pos["direction"] == "long" else price["offer"]
+        if current_price is None:
+            continue
+        if pos["direction"] == "long":
+            pnl = (current_price - pos["entry_price"]) * pos["size"]
+        else:
+            pnl = (pos["entry_price"] - current_price) * pos["size"]
+        floating_by_strategy[pos["strategy"]] = floating_by_strategy.get(pos["strategy"], 0.0) + pnl
+
+    pools = [
+        ("v6", "capital_current_v6", "capital_start_of_day_v6",
+         "kill_switch_triggered_v6", "kill_switch_triggered_at_v6", "floating_pnl_today_v6"),
+        ("mean_reversion", "capital_current_mr", "capital_start_of_day_mr",
+         "kill_switch_triggered_mr", "kill_switch_triggered_at_mr", "floating_pnl_today_mr"),
+    ]
+
+    for strategy, capital_field, start_field, flag_field, at_field, floating_field in pools:
+        capital_current = day_state.get(capital_field)
+        capital_start = day_state.get(start_field)
+        if capital_current is None or capital_start is None or capital_start == 0:
+            continue
+
+        floating = floating_by_strategy.get(strategy, 0.0)
+        d1_query(f"UPDATE live_daily_state SET {floating_field} = {floating} WHERE trade_date = '{today_str}'")
+
+        total_change = (capital_current - capital_start) + floating
+        loss_pct = -total_change / capital_start if total_change < 0 else 0.0
+
+        already_triggered = day_state.get(flag_field)
+        if not already_triggered and loss_pct >= threshold_pct:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            d1_query(
+                f"UPDATE live_daily_state SET {flag_field} = 1, {at_field} = '{now_iso}' "
+                f"WHERE trade_date = '{today_str}'"
+            )
+            print(f"[kill switch] *** ATTIVATO per {strategy} *** perdita giornaliera "
+                  f"{loss_pct*100:.2f}% >= soglia {threshold_pct*100:.2f}% "
+                  f"(realizzato+floating vs capitale inizio giornata). Nessun nuovo ordine "
+                  f"per {strategy} fino a domani. Posizioni già aperte NON chiuse forzatamente.")
+        elif loss_pct > 0:
+            print(f"  [kill switch/{strategy}] perdita giornaliera {loss_pct*100:.2f}% "
+                  f"(soglia {threshold_pct*100:.2f}%) — {'GIA ATTIVO' if already_triggered else 'sotto soglia'}")
 
 
 def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: dict):
@@ -481,6 +571,9 @@ def main():
     with IGSession(creds) as session:
         print("--- 1) Gestione posizioni aperte (V6 + MR) ---")
         manage_open_positions(session, today_str)
+
+        print("\n--- 1b) Verifica kill switch giornaliero (separato per pool) ---")
+        check_and_apply_kill_switches(session, today_str)
 
         # un solo fetch Dukascopy per strumento, riusato da V6 e MR
         print("\n--- 2) Scarico storico (riusato da entrambe le strategie) ---")
