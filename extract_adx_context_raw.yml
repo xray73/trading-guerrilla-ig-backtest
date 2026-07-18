@@ -1,0 +1,35 @@
+name: Extract ADX Context Raw Data
+
+# Estrae dati grezzi (ADX, EMA20/50, prezzi) per DAX/FTSE100, storico
+# CONTINUO 2015-2026 via Dukascopy diretto (D1 ha buchi 2017-19/2021-22,
+# mai caricati), in una nuova tabella D1 (adx_diagnostic_raw). NESSUNA
+# soglia ADX o finestra di persistenza pre-applicata — solo indicatori
+# già validati, con indice di barra continuo per permettere analisi
+# esplorativa successiva via query dirette, con qualunque
+# finestra/soglia, senza dover ripetere l'estrazione. Non scrive su
+# ohlc_prices.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extract-raw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Estrai dati grezzi
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python extract_adx_context_raw.py
