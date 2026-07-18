@@ -1,0 +1,33 @@
+name: Mean Reversion Full Pipeline (fattibilita corretta + split, unico run)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  mean-reversion-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Esegui pipeline completa
+        run: python mean_reversion_full_pipeline.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mean-reversion-pipeline-${{ github.run_id }}
+          path: mean_reversion_full_pipeline_results.csv
+          retention-days: 30
+          if-no-files-found: warn
