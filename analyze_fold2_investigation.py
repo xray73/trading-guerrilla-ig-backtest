@@ -1,0 +1,246 @@
+"""
+analyze_fold2_investigation.py — Indagine (19/07/2026) sul fold 2
+(test 2021-2023) del modello walk-forward, dove il segnale Q4 del DAX
+era quasi piatto (+1.03pt) mentre negli altri due fold era sostanziale
+(+15.76pt, +11.29pt). Scompone il fold per anno solare (2021, 2022,
+2023) usando lo STESSO modello già allenato su 2015-2021 — per capire
+se la piattezza viene da un anno specifico o è diffusa.
+
+Aggiunge anche il profilo descrittivo (rendimento, volatilità
+realizzata, VIX medio) per ciascun anno, stesso stile già usato per
+caratterizzare il 2026-ytd — per cercare un parallelo.
+
+Analisi ESPLORATIVA, nessun criterio di successo/fallimento fissato —
+solo dati da discutere insieme, come da accordo.
+
+Dati: adx_diagnostic_raw (D1) + VIX/VIX3M storico (Yahoo Finance).
+Nessuna scrittura su D1.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import pandas as pd
+import numpy as np
+import requests
+import yfinance as yf
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score
+
+DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
+API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+CHUNK_SIZE = 5000
+
+ATR_STOP_MULT = 1.5
+ATR_TARGET_MULT = 3.0
+MAX_HOLD = 48
+ER_WINDOW = 40
+FEATURES = ["adx", "atr_pct", "ema_spread_atr", "dist_ema200_atr", "vix", "vix_term_spread", "efficiency_ratio"]
+
+TRAIN_START, TRAIN_END = "2015-01-01", "2021-01-01"
+YEARS = [("2021", "2021-01-01", "2022-01-01"),
+         ("2022", "2022-01-01", "2023-01-01"),
+         ("2023", "2023-01-01", "2024-01-01")]
+
+
+def d1_query(sql: str, account_id: str, token: str) -> list[dict]:
+    url = f"{API_BASE}/{account_id}/d1/database/{DATABASE_ID}/query"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = requests.post(url, headers=headers, json={"sql": sql}, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(f"D1 query fallita: {data.get('errors')}")
+    return data["result"][0]["results"]
+
+
+def fetch_symbol_full(symbol: str, account_id: str, token: str) -> pd.DataFrame:
+    rows = []
+    offset = 0
+    while True:
+        sql = (
+            "SELECT bar_index, timestamp, close, high, low, atr, adx, ema20, ema50, "
+            "ema100, ema200, rolling_high_20, rolling_low_20, rolling_high_40, rolling_low_40 "
+            f"FROM adx_diagnostic_raw WHERE symbol='{symbol}' "
+            f"ORDER BY bar_index LIMIT {CHUNK_SIZE} OFFSET {offset}"
+        )
+        batch = d1_query(sql, account_id, token)
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += CHUNK_SIZE
+        if len(batch) < CHUNK_SIZE:
+            break
+        time.sleep(0.1)
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df.sort_values("bar_index").reset_index(drop=True)
+
+
+def simulate_outcome(df: pd.DataFrame, entry_pos: int, direction: str) -> str:
+    row = df.iloc[entry_pos]
+    entry_price = row["close"]
+    atr = row["atr"]
+    if direction == "long":
+        stop = entry_price - ATR_STOP_MULT * atr
+        target = entry_price + ATR_TARGET_MULT * atr
+    else:
+        stop = entry_price + ATR_STOP_MULT * atr
+        target = entry_price - ATR_TARGET_MULT * atr
+    end_pos = min(entry_pos + MAX_HOLD, len(df) - 1)
+    for j in range(entry_pos + 1, end_pos + 1):
+        bar = df.iloc[j]
+        if direction == "long":
+            if bar["low"] <= stop:
+                return "STOP"
+            if bar["high"] >= target:
+                return "TARGET"
+        else:
+            if bar["high"] >= stop:
+                return "STOP"
+            if bar["low"] <= target:
+                return "TARGET"
+    return "TIMEOUT"
+
+
+def build_dataset(symbol: str, df: pd.DataFrame, term_by_date) -> pd.DataFrame:
+    abs_move = df["close"].diff().abs()
+    net_move = df["close"].diff(ER_WINDOW).abs()
+    sum_move = abs_move.rolling(ER_WINDOW).sum()
+    er_series = (net_move / sum_move).values
+
+    direction = pd.Series(np.where(df["ema20"] > df["ema50"], "long", "short"), index=df.index)
+    trend_ampio_ok = np.where(direction == "long", df["ema100"] > df["ema200"], df["ema100"] < df["ema200"])
+    if symbol == "DAX":
+        dist_r = np.where(direction == "long",
+                           (df["close"] - df["rolling_high_20"]) / df["atr"],
+                           (df["rolling_low_20"] - df["close"]) / df["atr"])
+    else:
+        dist_r = np.where(direction == "long",
+                           (df["close"] - df["rolling_high_40"]) / df["atr"],
+                           (df["rolling_low_40"] - df["close"]) / df["atr"])
+
+    mask = (df["adx"] > 20) & (dist_r >= 0) & trend_ampio_ok
+    positions = df.index[mask].tolist()
+    entry_dates = df["timestamp"].dt.tz_localize(None).dt.normalize()
+
+    rows = []
+    for pos in positions:
+        if pos < ER_WINDOW or np.isnan(er_series[pos]):
+            continue
+        d = entry_dates.iloc[pos]
+        vix_val, term_val = None, None
+        for delta in range(0, 6):
+            check_date = d - pd.Timedelta(days=delta)
+            if check_date in term_by_date.index:
+                vix_val = term_by_date.loc[check_date, "vix"]
+                term_val = term_by_date.loc[check_date, "vix_term_spread"]
+                break
+        if vix_val is None:
+            continue
+
+        row = df.iloc[pos]
+        atr_pct = row["atr"] / row["close"] * 100
+        ema_spread_atr = abs(row["ema20"] - row["ema50"]) / row["atr"]
+        dist_ema200_atr = abs(row["close"] - row["ema200"]) / row["atr"]
+
+        esito = simulate_outcome(df, pos, direction.iloc[pos])
+        if esito not in ("TARGET", "STOP"):
+            continue
+
+        rows.append({
+            "timestamp": row["timestamp"], "adx": row["adx"], "atr_pct": atr_pct,
+            "ema_spread_atr": ema_spread_atr, "dist_ema200_atr": dist_ema200_atr,
+            "vix": vix_val, "vix_term_spread": term_val, "efficiency_ratio": er_series[pos],
+            "target": 1 if esito == "TARGET" else 0,
+        })
+    return pd.DataFrame(rows)
+
+
+def main():
+    token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account_id:
+        print("ERRORE: CLOUDFLARE_API_TOKEN o CLOUDFLARE_ACCOUNT_ID mancanti.")
+        return
+
+    os.makedirs("results", exist_ok=True)
+    log_lines = []
+
+    def log(msg):
+        print(msg)
+        log_lines.append(msg)
+
+    log("=== Indagine fold 2 (2021-2023) — scomposizione per anno + profilo descrittivo ===\n")
+
+    log("Scarico VIX e VIX3M...")
+    vix = yf.download("^VIX", start="2014-10-01", end="2026-07-19", progress=False)
+    vix3m = yf.download("^VIX3M", start="2014-10-01", end="2026-07-19", progress=False)
+    for d_ in (vix, vix3m):
+        if isinstance(d_.columns, pd.MultiIndex):
+            d_.columns = d_.columns.get_level_values(0)
+    vix = vix.reset_index()[["Date", "Close"]].rename(columns={"Close": "vix"})
+    vix3m = vix3m.reset_index()[["Date", "Close"]].rename(columns={"Close": "vix3m"})
+    vix["Date"] = pd.to_datetime(vix["Date"]).dt.tz_localize(None).dt.normalize()
+    vix3m["Date"] = pd.to_datetime(vix3m["Date"]).dt.tz_localize(None).dt.normalize()
+    term = pd.merge(vix, vix3m, on="Date", how="inner")
+    term["vix_term_spread"] = term["vix"] - term["vix3m"]
+    term["backwardation"] = term["vix"] > term["vix3m"]
+    term_by_date = term.set_index("Date")
+    log("")
+
+    for symbol in ("DAX", "FTSE100"):
+        log(f"{'='*70}\n{symbol}\n{'='*70}")
+        raw = fetch_symbol_full(symbol, account_id, token)
+        raw["direction"] = np.where(raw["ema20"] > raw["ema50"], 1, -1)
+        data = build_dataset(symbol, raw, term_by_date)
+
+        train = data[(data["timestamp"] >= pd.Timestamp(TRAIN_START, tz="UTC")) &
+                     (data["timestamp"] < pd.Timestamp(TRAIN_END, tz="UTC"))]
+        log(f"  Train (2015-2021): {len(train)} trade\n")
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(train[FEATURES])
+        model = LogisticRegression(max_iter=1000, C=1.0)
+        model.fit(X_train, train["target"].values)
+
+        for year_label, y_start, y_end in YEARS:
+            test_y = data[(data["timestamp"] >= pd.Timestamp(y_start, tz="UTC")) &
+                          (data["timestamp"] < pd.Timestamp(y_end, tz="UTC"))]
+            if len(test_y) < 20:
+                log(f"  {year_label}: campione troppo piccolo ({len(test_y)}), salto.")
+                continue
+
+            X_test_y = scaler.transform(test_y[FEATURES])
+            proba_y = model.predict_proba(X_test_y)[:, 1]
+            auc_y = roc_auc_score(test_y["target"].values, proba_y) if test_y["target"].nunique() > 1 else float("nan")
+
+            test_y2 = test_y.copy()
+            test_y2["proba"] = proba_y
+            q4_cut = test_y2["proba"].quantile(0.75)
+            q4 = test_y2[test_y2["proba"] >= q4_cut]
+            rest = test_y2[test_y2["proba"] < q4_cut]
+            diff = q4["target"].mean() - rest["target"].mean() if len(q4) and len(rest) else float("nan")
+
+            raw_y = raw[(raw["timestamp"] >= pd.Timestamp(y_start, tz="UTC")) & (raw["timestamp"] < pd.Timestamp(y_end, tz="UTC"))]
+            ret_tot = (raw_y["close"].iloc[-1] / raw_y["close"].iloc[0] - 1) * 100
+            daily = raw_y.set_index("timestamp")["close"].resample("1D").last().dropna()
+            vol_annual = daily.pct_change().dropna().std() * np.sqrt(252) * 100
+            term_y = term[(term["Date"] >= pd.Timestamp(y_start)) & (term["Date"] < pd.Timestamp(y_end))]
+            vix_medio = term_y["vix"].mean() if not term_y.empty else float("nan")
+
+            log(f"  --- {year_label} ---")
+            log(f"    Trade: n={len(test_y)}  AUC={auc_y:.3f}  Q4 vs resto={diff*100:+.2f}pt (n_Q4={len(q4)}, n_resto={len(rest)})")
+            log(f"    Rendimento {symbol}: {ret_tot:+.1f}%  Volatilita annualizzata: {vol_annual:.1f}%  VIX medio: {vix_medio:.2f}")
+        log("")
+
+    with open("results/analyze_fold2_investigation.txt", "w") as f:
+        f.write("\n".join(log_lines))
+
+    print("\n=== Completato. ===")
+
+
+if __name__ == "__main__":
+    main()

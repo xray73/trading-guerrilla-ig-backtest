@@ -1,0 +1,41 @@
+name: Analyze Fold2 Investigation
+
+# Indagine esplorativa sul fold 2 (test 2021-2023) del modello
+# walk-forward: scompone per anno solare (2021/2022/2023) usando lo
+# stesso modello già allenato, con profilo descrittivo di ciascun
+# anno (rendimento, volatilità, VIX). Nessun criterio fissato, solo
+# dati da discutere. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  fold2-investigation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests yfinance scikit-learn
+
+      - name: Indagine fold 2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_fold2_investigation.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fold2-investigation-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
