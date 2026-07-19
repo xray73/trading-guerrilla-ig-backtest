@@ -1,0 +1,41 @@
+name: Analyze DAX FTSE100 Agreement
+
+# Test: quando DAX e FTSE100 concordano sulla direzione nello stesso
+# momento, il segnale di ciascuno è più affidabile? Meccanismo di
+# trading reale fin dall'inizio, robustezza su 5 soglie ADX, errore
+# standard riportato per ogni cella. Zero dati esterni, solo
+# adx_diagnostic_raw. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dax-ftse-agreement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Analizza accordo DAX-FTSE100
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_dax_ftse_agreement.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dax-ftse-agreement-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
