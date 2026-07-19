@@ -1,0 +1,39 @@
+name: Simulate JunJul2026 With Gold
+
+# Confronto diretto per il periodo 1 giugno - 19 luglio 2026 (quello
+# con FTSE100 debole per shock USA-Iran/petrolio, diagnosticato il
+# 19/07/2026): baseline (DAX+FTSE100) vs +GOLD (DAX+FTSE100+GOLD),
+# stessa diagnostica di diagnose_junjul2026_losses.py per confronto
+# diretto. Nessuna scrittura su D1, nessuna modifica a
+# engine.py/live_execute.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  simulate-junjul2026-gold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Simulazione giugno-luglio 2026 con GOLD
+        run: python simulate_junjul2026_with_gold.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulate-junjul2026-gold-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
