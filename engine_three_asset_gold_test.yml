@@ -1,0 +1,39 @@
+name: Engine Three Asset Gold Test
+
+# Sanity check + impatto sui 5 periodi ufficiali dell'estensione a 3
+# strumenti (DAX/FTSE100/GOLD) con selezione multi-candidato per
+# correlazione minima, tetto posizioni concorrenti invariato a 2 —
+# nessuno slot in piu', nessuna diluizione di capitale. Testato sia
+# per V6 (capitale 1.400EUR) sia per mean-reversion (capitale 600EUR).
+# Nessuna scrittura su D1, nessuna modifica a engine.py/live_execute.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  three-asset-gold-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Test motore 3 strumenti con GOLD
+        run: python engine_three_asset_gold_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: three-asset-gold-test-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
