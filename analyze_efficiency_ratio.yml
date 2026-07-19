@@ -1,0 +1,40 @@
+name: Analyze Efficiency Ratio
+
+# Test Efficiency Ratio di Kaufman (movimento netto / movimento totale)
+# come predittore, robustezza su 4 finestre (10/20/30/40 barre),
+# meccanismo di trading reale fin dall'inizio, errore standard
+# riportato per ogni cella. Nessun dato esterno, nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  efficiency-ratio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Analizza Efficiency Ratio
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_efficiency_ratio.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: efficiency-ratio-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
