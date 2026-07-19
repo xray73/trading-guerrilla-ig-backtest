@@ -1,0 +1,41 @@
+name: Analyze Period Profile
+
+# Profilo descrittivo ASETTICO dei 5 periodi ufficiali (rendimento,
+# volatilità realizzata, correlazione DAX-FTSE100, distribuzione ADX,
+# frequenza cambio direzione, VIX/struttura a termine) — nessuna
+# regola derivata, solo caratterizzazione per capire cosa distingue
+# strutturalmente il 2026-ytd. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  period-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests yfinance
+
+      - name: Profilo descrittivo periodi
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_period_profile.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: period-profile-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
