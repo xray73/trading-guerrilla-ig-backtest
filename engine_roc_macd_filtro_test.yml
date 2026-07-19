@@ -1,0 +1,37 @@
+name: Engine ROC MACD Filtro Test
+
+# Sanity check + impatto sui 5 periodi ufficiali del filtro di conferma
+# momentum ROC+MACD (angolo nuovo, mai testato prima — diverso dai
+# filtri ADX×volatilita'/fascia oraria gia' bocciati in questa sessione).
+# Nessuna scrittura su D1, nessuna modifica a engine.py/live_execute.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  roc-macd-filtro-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Test filtro ROC+MACD
+        run: python engine_roc_macd_filtro_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc-macd-filtro-test-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
