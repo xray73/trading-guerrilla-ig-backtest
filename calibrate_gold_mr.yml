@@ -1,0 +1,39 @@
+name: Calibrate Gold MR
+
+# Calibrazione walk-forward del moltiplicatore ATR per GOLD in
+# modalita' mean-reversion, isolato da DAX/FTSE100 (train 2023 ->
+# verifica 2024-25 -> conferma sui restanti 3 periodi). I parametri
+# attuali (ATR 3.5x) sono riciclati dal V6 breakout, mai calibrati
+# per MR specificamente. Nessuna scrittura su D1, nessuna modifica a
+# engine.py/engine_mean_reversion.py/mean_reversion_signals.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  calibrate-gold-mr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Calibrazione GOLD mean-reversion
+        run: python calibrate_gold_mr.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibrate-gold-mr-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
