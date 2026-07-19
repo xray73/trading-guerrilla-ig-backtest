@@ -1,29 +1,27 @@
 """
-analyze_vix_per_trade.py — Test a livello di SINGOLO TRADE (19/07/2026),
-non di media per periodo — lezione imparata dallo spread EMA (sez.
-precedente): un pattern che sembra pulito nelle medie per periodo può
-sparire completamente quando testato trade per trade. Verifichiamo se
-lo stesso destino tocca l'ipotesi VIX prima di crederci.
+analyze_vix_per_trade.py — v3 (19/07/2026): test di robustezza
+dell'ipotesi VIX rispetto alla SOGLIA ADX usata per selezionare la
+popolazione di trade — stesso principio già applicato alle finestre
+di persistenza (5/20/40/60 barre) e ai tetti di durata (24/48/96
+barre): se un pattern regge solo a una soglia specifica e sparisce
+spostandosi di poco, è fragile quanto le altre ipotesi già smentite
+oggi (spread EMA, distanza breakout).
 
-Unisce il VIX giornaliero (Yahoo Finance) a ciascun trade del "bucket
-bloccato" DAX (ADX>30 E ATR%>=0.25, la condizione che
-engine_adx_atr_filtro.py blocca) per DATA ESATTA — non per medie di
-periodo. Classifica ogni trade come:
-  - "calmo"  (VIX del giorno < 15)
-  - "panico" (VIX del giorno > 25)
-  - "medio"  (15-25, l'ipotesi: "né calmo né in panico" = peggiore)
+SEMPLIFICAZIONE rispetto alla v2: qui NON uso la regola composta
+specifica del filtro ADX×ATR (che mescolava ADX+ATR+breakout+trend
+ampio) — uso SOLO la soglia ADX pura, a più livelli (20, 25, 30, 35,
+40), per isolare l'effetto VIX senza confondere le variabili. Stessa
+metodologia stop/target reale (48 barre, parametro vero del sistema)
+di tutti i test precedenti.
 
-Calcola il win rate REALE (stop/target fissi, max holding 48 barre —
-stessa metodologia già validata oggi, non persistenza a punto fisso)
-per ciascuna categoria, su TUTTO lo storico insieme (non periodo per
-periodo) — massima potenza statistica disponibile.
+Per ciascuna soglia ADX e ciascuno dei due strumenti: divide i trade
+per fascia VIX del giorno esatto (calmo <15, medio 15-25, panico >25)
+e calcola il win rate reale.
 
-Output SOLO aggregato per categoria (win/loss per fascia VIX) — MAI
-elenco di singoli trade, coerente con le regole del progetto sui dati
-individuali in chat.
+Output SOLO aggregato — mai trade singoli elencati.
 
-Dati: adx_diagnostic_raw (D1, già esteso con tutti gli indicatori) +
-VIX storico giornaliero (Yahoo Finance, ^VIX). Nessuna scrittura su D1.
+Dati: adx_diagnostic_raw (D1) + VIX storico giornaliero (Yahoo
+Finance). Nessuna scrittura su D1.
 """
 
 from __future__ import annotations
@@ -41,7 +39,9 @@ CHUNK_SIZE = 5000
 
 ATR_STOP_MULT = 1.5
 ATR_TARGET_MULT = 3.0
-MAX_HOLD_BARS = 48
+MAX_HOLD = 48  # parametro vero del sistema
+
+ADX_THRESHOLDS = [20, 25, 30, 35, 40]
 
 VIX_CALMO_SOGLIA = 15.0
 VIX_PANICO_SOGLIA = 25.0
@@ -58,14 +58,14 @@ def d1_query(sql: str, account_id: str, token: str) -> list[dict]:
     return data["result"][0]["results"]
 
 
-def fetch_dax_full(account_id: str, token: str) -> pd.DataFrame:
+def fetch_symbol_full(symbol: str, account_id: str, token: str) -> pd.DataFrame:
     rows = []
     offset = 0
     while True:
         sql = (
             "SELECT bar_index, timestamp, close, high, low, atr, adx, ema20, ema50, "
-            "ema100, ema200, rolling_high_20, rolling_low_20 "
-            "FROM adx_diagnostic_raw WHERE symbol='DAX' "
+            "ema100, ema200, rolling_high_20, rolling_low_20, rolling_high_40, rolling_low_40 "
+            f"FROM adx_diagnostic_raw WHERE symbol='{symbol}' "
             f"ORDER BY bar_index LIMIT {CHUNK_SIZE} OFFSET {offset}"
         )
         batch = d1_query(sql, account_id, token)
@@ -82,9 +82,6 @@ def fetch_dax_full(account_id: str, token: str) -> pd.DataFrame:
 
 
 def simulate_outcome(df: pd.DataFrame, entry_pos: int, direction: str) -> str:
-    """Simula l'esito reale (stop/target fissi, max 48 barre) a partire
-    dalla posizione entry_pos nel dataframe (indice posizionale, non
-    bar_index). Stessa metodologia già validata oggi."""
     row = df.iloc[entry_pos]
     entry_price = row["close"]
     atr = row["atr"]
@@ -95,7 +92,7 @@ def simulate_outcome(df: pd.DataFrame, entry_pos: int, direction: str) -> str:
         stop = entry_price + ATR_STOP_MULT * atr
         target = entry_price - ATR_TARGET_MULT * atr
 
-    end_pos = min(entry_pos + MAX_HOLD_BARS, len(df) - 1)
+    end_pos = min(entry_pos + MAX_HOLD, len(df) - 1)
     for j in range(entry_pos + 1, end_pos + 1):
         bar = df.iloc[j]
         if direction == "long":
@@ -125,11 +122,8 @@ def main():
         print(msg)
         log_lines.append(msg)
 
-    log("=== VIX per-trade — bucket bloccato DAX (ADX>30 + ATR%>=0.25) ===\n")
-
-    log("Scarico dati DAX completi da D1...")
-    dax = fetch_dax_full(account_id, token)
-    log(f"  {len(dax)} barre caricate.\n")
+    log("=== VIX per-trade v3 — robustezza a soglia ADX pura (20/25/30/35/40) ===")
+    log("    Solo soglia ADX (nessuna condizione ATR/breakout/trend ampio) per isolare l'effetto VIX.\n")
 
     log("Scarico storico VIX (Yahoo Finance)...")
     vix = yf.download("^VIX", start="2014-10-01", end="2026-07-19", progress=False)
@@ -137,79 +131,85 @@ def main():
         vix.columns = vix.columns.get_level_values(0)
     vix = vix.reset_index()
     vix["Date"] = pd.to_datetime(vix["Date"]).dt.tz_localize(None).dt.normalize()
-    vix = vix[["Date", "Close"]].rename(columns={"Close": "vix_close"}).sort_values("Date").reset_index(drop=True)
+    vix_by_date = vix.set_index("Date")["Close"]
     log(f"  {len(vix)} barre VIX caricate.\n")
 
-    # --- identifica il bucket bloccato: ADX>30, ATR%>=0.25, breakout vero, trend ampio confermato ---
-    dax["atr_pct"] = dax["atr"] / dax["close"] * 100
-    dax["direction"] = np.where(dax["ema20"] > dax["ema50"], "long", "short")
-    dax["dist_r"] = np.where(
-        dax["direction"] == "long",
-        (dax["close"] - dax["rolling_high_20"]) / dax["atr"],
-        (dax["rolling_low_20"] - dax["close"]) / dax["atr"],
-    )
-    trend_ampio_ok = np.where(
-        dax["direction"] == "long", dax["ema100"] > dax["ema200"], dax["ema100"] < dax["ema200"]
-    )
+    all_rows = []
 
-    mask_bucket = (
-        (dax["adx"] > 30) & (dax["atr_pct"] >= 0.25) & (dax["dist_r"] >= 0) & trend_ampio_ok
-    )
-    bucket_positions = dax.index[mask_bucket].tolist()
-    log(f"Trade nel bucket bloccato trovati: {len(bucket_positions)}\n")
+    for symbol in ("DAX", "FTSE100"):
+        log(f"--- {symbol} ---")
+        df = fetch_symbol_full(symbol, account_id, token)
+        log(f"  {len(df)} barre caricate.")
 
-    # --- simula esito reale per ciascun trade del bucket, poi unisce al VIX per data ---
-    log("Simulo esito reale (stop/target fissi, max 48 barre) e unisco al VIX per data...")
-    vix_by_date = vix.set_index("Date")["vix_close"]
+        direction = pd.Series(np.where(df["ema20"] > df["ema50"], "long", "short"), index=df.index)
 
-    risultati = []
-    for pos in bucket_positions:
-        entry_ts = dax.iloc[pos]["timestamp"]
-        entry_date = entry_ts.tz_localize(None).normalize()
-        direction = dax.iloc[pos]["direction"]
-        esito = simulate_outcome(dax, pos, direction)
+        # pre-calcola la fascia VIX per OGNI barra una sola volta (indipendente dalla soglia ADX)
+        entry_dates = df["timestamp"].dt.tz_localize(None).dt.normalize()
+        unique_dates = entry_dates.unique()
+        date_to_fascia = {}
+        for d in unique_dates:
+            vix_val = None
+            for delta in range(0, 6):
+                check_date = pd.Timestamp(d) - pd.Timedelta(days=delta)
+                if check_date in vix_by_date.index:
+                    vix_val = vix_by_date.loc[check_date]
+                    break
+            if vix_val is None:
+                date_to_fascia[d] = None
+            elif vix_val < VIX_CALMO_SOGLIA:
+                date_to_fascia[d] = "calmo"
+            elif vix_val > VIX_PANICO_SOGLIA:
+                date_to_fascia[d] = "panico"
+            else:
+                date_to_fascia[d] = "medio"
+        vix_fascia_all = entry_dates.map(date_to_fascia)
 
-        # trova il valore VIX del giorno, o del giorno di trading precedente più vicino (fino a 5gg indietro)
-        vix_val = None
-        for delta in range(0, 6):
-            check_date = entry_date - pd.Timedelta(days=delta)
-            if check_date in vix_by_date.index:
-                vix_val = vix_by_date.loc[check_date]
-                break
+        for adx_th in ADX_THRESHOLDS:
+            positions = df.index[df["adx"] > adx_th].tolist()
+            log(f"\n  ADX > {adx_th}: {len(positions)} barre di contesto")
 
-        if vix_val is None:
-            continue
+            esiti = {"calmo": {"TARGET": 0, "STOP": 0, "TIMEOUT": 0},
+                     "medio": {"TARGET": 0, "STOP": 0, "TIMEOUT": 0},
+                     "panico": {"TARGET": 0, "STOP": 0, "TIMEOUT": 0}}
 
-        if vix_val < VIX_CALMO_SOGLIA:
-            fascia = "calmo"
-        elif vix_val > VIX_PANICO_SOGLIA:
-            fascia = "panico"
-        else:
-            fascia = "medio"
+            for pos in positions:
+                fascia = vix_fascia_all.iloc[pos]
+                if fascia is None:
+                    continue
+                esito = simulate_outcome(df, pos, direction.iloc[pos])
+                esiti[fascia][esito] += 1
 
-        risultati.append({"esito": esito, "fascia_vix": fascia, "vix_val": vix_val})
-
-    df_ris = pd.DataFrame(risultati)
-    log(f"Trade con VIX abbinato con successo: {len(df_ris)} / {len(bucket_positions)}\n")
+            for fascia in ("calmo", "medio", "panico"):
+                t, s, to = esiti[fascia]["TARGET"], esiti[fascia]["STOP"], esiti[fascia]["TIMEOUT"]
+                n_decisi = t + s
+                n_tot = t + s + to
+                if n_decisi > 0:
+                    wr = t / n_decisi * 100
+                    log(f"    {fascia:<8} (n={n_tot:>5}): win rate={wr:.2f}%")
+                else:
+                    wr = float("nan")
+                    log(f"    {fascia:<8}: vuoto")
+                all_rows.append({
+                    "symbol": symbol, "adx_threshold": adx_th, "fascia_vix": fascia,
+                    "n_target": t, "n_stop": s, "n_timeout": to, "win_rate": wr,
+                })
+        log("")
 
     log("=" * 70)
-    log("WIN RATE REALE PER FASCIA VIX (giorno esatto del trade, non media di periodo)")
+    log("RIEPILOGO — 'calmo' è sempre il peggiore, a ogni soglia ADX?")
     log("=" * 70)
-    for fascia in ("calmo", "medio", "panico"):
-        sub = df_ris[df_ris["fascia_vix"] == fascia]
-        n_target = (sub["esito"] == "TARGET").sum()
-        n_stop = (sub["esito"] == "STOP").sum()
-        n_timeout = (sub["esito"] == "TIMEOUT").sum()
-        n_decisi = n_target + n_stop
-        win_rate = n_target / n_decisi * 100 if n_decisi > 0 else float("nan")
-        if n_decisi > 0:
-            log(f"  {fascia:<8} (n={len(sub):>4}, VIX medio={sub['vix_val'].mean():.2f}): "
-                f"TARGET={n_target} STOP={n_stop} TIMEOUT={n_timeout}  win rate={win_rate:.2f}%")
-        else:
-            log(f"  {fascia:<8}: campione vuoto")
+    df_all = pd.DataFrame(all_rows)
+    for symbol in ("DAX", "FTSE100"):
+        for adx_th in ADX_THRESHOLDS:
+            sub = df_all[(df_all["symbol"] == symbol) & (df_all["adx_threshold"] == adx_th)]
+            sub_valid = sub.dropna(subset=["win_rate"])
+            if sub_valid.empty:
+                continue
+            peggiore = sub_valid.loc[sub_valid["win_rate"].idxmin(), "fascia_vix"]
+            log(f"  {symbol} ADX>{adx_th}: fascia peggiore = {peggiore}")
 
-    df_ris.to_csv("results/vix_per_trade_dettaglio.csv", index=False)
-    with open("results/analyze_vix_per_trade.txt", "w") as f:
+    df_all.to_csv("results/vix_per_trade_v3_riepilogo.csv", index=False)
+    with open("results/analyze_vix_per_trade_v3.txt", "w") as f:
         f.write("\n".join(log_lines))
 
     print("\n=== Completato. ===")
