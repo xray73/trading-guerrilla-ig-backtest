@@ -1,0 +1,40 @@
+name: Analyze VIX Term Structure
+
+# Test contango/backwardation (VIX vs VIX3M) sul contesto V6 vero,
+# con controllo di significatività (errore standard atteso per
+# rumore) integrato direttamente nell'output, robustezza su 5 soglie
+# ADX. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  vix-term-structure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas numpy requests
+
+      - name: Analizza struttura a termine VIX
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_vix_term_structure.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vix-term-structure-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
