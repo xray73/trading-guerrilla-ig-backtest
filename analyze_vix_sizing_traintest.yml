@@ -1,0 +1,42 @@
+name: Analyze VIX Sizing Train Test
+
+# Test train/test rigoroso: modulazione size per fascia VIX, con
+# moltiplicatori calibrati SOLO su 2015-2023 (regola fissata: win
+# rate fascia / win rate medio, clip 0.5x-1.5x), verificati alla
+# cieca su 2024-2026 mai visto. Popolazione: contesto V6 vero
+# (ADX>20 + breakout reale + trend ampio confermato). Nessuna
+# scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  vix-sizing-traintest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas numpy requests
+
+      - name: Test train/test modulazione size VIX
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_vix_sizing_traintest.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vix-sizing-traintest-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
