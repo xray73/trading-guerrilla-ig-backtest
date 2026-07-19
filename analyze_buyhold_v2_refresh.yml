@@ -1,0 +1,40 @@
+name: Analyze Buyhold V2 Refresh
+
+# Rifacimento del confronto motore V6 vs buy&hold (Charter sez. 6) con
+# parametri di produzione attuali: capitale 2.000EUR, spread realistico
+# DAX 2.5pt/FTSE100 1.5pt, motore BacktestEngineFloatingKillSwitch,
+# tassi ECB/BoE aggiornati per periodo. Sostituisce il calcolo del
+# 13/07/2026 (RCA sez. 18), fatto con capitale 900EUR e spread non
+# ancora corretto. Nessuna scrittura su D1, nessuna modifica a
+# engine.py/live_execute.py — solo lettura dati storici Dukascopy.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  buyhold-v2-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Rifacimento buy&hold vs motore V6
+        run: python analyze_buyhold_v2_refresh.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buyhold-v2-refresh-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
