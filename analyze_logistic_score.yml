@@ -1,0 +1,40 @@
+name: Analyze Logistic Score
+
+# Regressione logistica (DAX e FTSE100 separati) su ADX/ATR%/spread
+# EMA/distanza EMA200/VIX/struttura a termine VIX, allenata solo su
+# 2015-2023, verificata alla cieca su 2024-2026. Confronto AUC
+# train vs test per giudicare overfitting. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  logistic-score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests yfinance scikit-learn
+
+      - name: Regressione logistica multi-parametro
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_logistic_score.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logistic-score-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
