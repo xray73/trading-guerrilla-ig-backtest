@@ -1,0 +1,42 @@
+name: Analyze MFE Per VIX Band
+
+# Test diagnostico PRIMA di costruire un motore/filtro vero: misura
+# l'MFE (quanto i trade si muovono a favore prima di chiudersi) per
+# fascia VIX del giorno, sul contesto V6 completo (ADX>20 + breakout +
+# trend ampio). Se le fasce deboli hanno MFE basso, modulare
+# target/stop non aiuterebbe (il problema è il segnale, non l'uscita).
+# Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  mfe-vix-band:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas numpy requests
+
+      - name: Analizza MFE per fascia VIX
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_mfe_per_vix_band.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mfe-vix-band-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
