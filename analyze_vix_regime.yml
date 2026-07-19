@@ -1,0 +1,38 @@
+name: Analyze VIX Regime
+
+# Scarica lo storico VIX (Yahoo Finance, ^VIX) 2015-2026 e lo confronta
+# con i 5 periodi ufficiali, per verificare se il regime di volatilita
+# generale del mercato spiega la dicotomia trovata nei test del
+# filtro ADX×ATR e mean-reversion (nessun parametro tecnico derivato
+# da DAX/FTSE100 ci era riuscito). Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  vix-regime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas numpy
+
+      - name: Analizza regime VIX
+        run: python analyze_vix_regime.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vix-regime-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
