@@ -1,0 +1,42 @@
+name: Analyze Fold2 2021 Deepdive
+
+# Approfondimento esplorativo sul DAX 2021 (l'anno anomalo emerso in
+# analyze_fold2_investigation.py: Q4 vs resto = -3.73pt, AUC=0.505).
+# Riusa lo stesso modello allenato 2015-2021, isola il 2021 e mostra
+# le medie delle feature per Q4 vs resto (+ coefficienti del modello +
+# controllo 2023). Nessun criterio fissato, solo dati da discutere.
+# Nessuna scrittura su D1, nessuna modifica a engine.py/live_execute.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  fold2-2021-deepdive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests yfinance scikit-learn
+
+      - name: Approfondimento DAX 2021
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_fold2_2021_deepdive.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fold2-2021-deepdive-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
