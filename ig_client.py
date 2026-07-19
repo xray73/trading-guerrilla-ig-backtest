@@ -2,9 +2,10 @@
 ig_client.py — Modulo di integrazione IG per Fase 2 (demo trading).
 
 Fornisce: autenticazione (riusa la logica già testata in ig_login_test.py),
-lettura prezzi correnti, invio ordine (posizione + stop/target), chiusura
-posizione. SEMPRE contro demo-api.ig.com in questa fase — mai api.ig.com
-(live) finché non deciso esplicitamente e verificato più volte.
+lettura prezzi correnti, lettura saldo/equity del conto, invio ordine
+(posizione + stop/target), chiusura posizione. SEMPRE contro
+demo-api.ig.com in questa fase — mai api.ig.com (live) finché non deciso
+esplicitamente e verificato più volte.
 
 Design: funzioni pure/stateless dove possibile, una classe IGSession che
 gestisce il ciclo di vita di CST/X-SECURITY-TOKEN per non fare login ad
@@ -20,6 +21,19 @@ Mapping strumento -> EPIC IG: da verificare e completare con gli EPIC
 reali (Impostazioni -> Cerca mercato -> DAX/FTSE100 -> "Dettagli" mostra
 l'EPIC). Placeholder sotto — NON usare in produzione senza aver confermato
 gli EPIC corretti dalla piattaforma IG.
+
+AGGIORNAMENTO 19/07/2026 — get_account_balance():
+Aggiunto per supportare il meccanismo "capitale investibile = equity reale
+- accantonato" discusso in chat (protezione dell'accantonamento senza
+segregazione fisica su un secondo conto). Usa GET /accounts (v1), che
+ritorna balance/deposit/profitLoss/available per ciascun conto associato
+alla sessione. L'equity reale (realizzato + floating aperto) è
+balance+profitLoss, non "balance" da solo (che non include le posizioni
+aperte) né "available" (che sottrae anche il margine impegnato — utile per
+sapere quanto puoi ancora aprire, non per sapere quanto vale il conto).
+NON ancora verificato contro il conto demo reale — vedi
+ig_account_balance_test.py per il primo test dal vero prima di usarlo
+nella logica di sizing.
 """
 
 from __future__ import annotations
@@ -156,6 +170,51 @@ class IGSession:
         resp.raise_for_status()
         return resp.json()
 
+    # ---- conto ----
+
+    def get_account_balance(self, account_id: Optional[str] = None) -> dict:
+        """Legge saldo/equity del conto via GET /accounts (v1). Ritorna il
+        conto specificato (o quello della sessione corrente se
+        account_id=None) con:
+          - balance: saldo realizzato (NON include posizioni aperte)
+          - deposit: margine attualmente impegnato dalle posizioni aperte
+          - profit_loss: P&L non realizzato delle posizioni aperte (floating)
+          - available: fondi disponibili per aprire nuove posizioni
+            (balance + profitLoss - margine impegnato, circa)
+          - equity: balance + profit_loss — QUESTO è il valore reale del
+            conto in questo momento, realizzato+floating, da usare per il
+            confronto con capitale_investibile/accantonato, non 'balance'
+            da solo (che ignora le posizioni aperte) né 'available' (che
+            sottrae anche il margine).
+        Solleva RuntimeError se il conto richiesto non è tra quelli
+        ritornati dall'API."""
+        target_id = account_id or self.account_id
+        resp = requests.get(f"{BASE_URL}/accounts", headers=self._headers(version="1"), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for acc in data.get("accounts", []):
+            if acc.get("accountId") == target_id:
+                bal = acc.get("balance", {})
+                balance = bal.get("balance")
+                profit_loss = bal.get("profitLoss")
+                return {
+                    "account_id": acc.get("accountId"),
+                    "account_name": acc.get("accountName"),
+                    "account_type": acc.get("accountType"),
+                    "currency": acc.get("currency"),
+                    "balance": balance,
+                    "deposit": bal.get("deposit"),
+                    "profit_loss": profit_loss,
+                    "available": bal.get("available"),
+                    "equity": (balance or 0.0) + (profit_loss or 0.0),
+                }
+
+        raise RuntimeError(
+            f"Conto '{target_id}' non trovato tra quelli ritornati da /accounts "
+            f"({[a.get('accountId') for a in data.get('accounts', [])]})."
+        )
+
     # ---- ordini ----
 
     def place_order(self, instrument: str, direction: Literal["BUY", "SELL"],
@@ -236,8 +295,8 @@ def load_credentials_from_env() -> IGCredentials:
 
 if __name__ == "__main__":
     # self-test: login, lettura prezzo DAX e FTSE100 (EPIC entrambi
-    # verificati il 16/07/2026), test dry_run di ordine/chiusura (nessun
-    # ordine reale inviato).
+    # verificati il 16/07/2026), lettura saldo conto, test dry_run di
+    # ordine/chiusura (nessun ordine reale inviato).
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
         print(f"Sessione OK, account {session.account_id}")
@@ -248,6 +307,16 @@ if __name__ == "__main__":
                       f"stato_mercato={price['market_status']}")
             except Exception as e:
                 print(f"ATTENZIONE: lettura prezzo {instrument} fallita ({type(e).__name__}: {e})")
+
+        print("\nTest lettura saldo conto...")
+        try:
+            bal = session.get_account_balance()
+            print(f"  Conto: {bal['account_name']} ({bal['account_type']}, {bal['currency']})")
+            print(f"  balance={bal['balance']}  deposit(margine)={bal['deposit']}  "
+                  f"profit_loss(floating)={bal['profit_loss']}  available={bal['available']}")
+            print(f"  equity (balance+profit_loss) = {bal['equity']}")
+        except Exception as e:
+            print(f"ATTENZIONE: lettura saldo fallita ({type(e).__name__}: {e})")
 
         print("\nTest place_order in dry_run (nessun ordine reale inviato)...")
         try:
