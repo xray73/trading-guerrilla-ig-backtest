@@ -1,0 +1,47 @@
+name: Engine ADX x ATR Filtro (test + impatto)
+
+# 1) Sanity check obbligatorio: la sottoclasse deve essere identica al
+#    motore standard con soglie irraggiungibili.
+# 2) Misura l'impatto reale sui 5 periodi ufficiali, capitale 2.000€,
+#    contro il criterio di promozione fissato in anticipo (18/07/2026,
+#    identico a quello già usato per il filtro orario): >=4/5 periodi
+#    migliorano PnL/|drawdown|, nessun periodo sotto soglia di
+#    significatività (30 trade).
+#
+# Regole (diverse per strumento, scoperte il 18/07/2026):
+#   DAX: salta se ADX>30 E ATR%>=0.25 (combinazione)
+#   FTSE100: salta se ADX>40 (soglia singola)
+on:
+  workflow_dispatch: {}
+
+jobs:
+  adx-atr-filtro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Sanity check + impatto sui 5 periodi
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python engine_adx_atr_filtro_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adx-atr-filtro-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
