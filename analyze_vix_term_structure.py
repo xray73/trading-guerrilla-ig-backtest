@@ -170,17 +170,18 @@ def main():
                                (df["rolling_low_40"] - df["close"]) / df["atr"])
 
         entry_dates = df["timestamp"].dt.tz_localize(None).dt.normalize()
-        unique_dates = entry_dates.unique()
+        unique_dates = pd.Series(entry_dates.unique()).tolist()
         date_to_regime = {}
         for d in unique_dates:
+            d = pd.Timestamp(d)
             regime = None
             for delta in range(0, 6):
-                check_date = pd.Timestamp(d) - pd.Timedelta(days=delta)
+                check_date = d - pd.Timedelta(days=delta)
                 if check_date in term_by_date.index:
-                    regime = "backwardation" if term_by_date.loc[check_date] else "contango"
+                    regime = "backwardation" if bool(term_by_date.loc[check_date]) else "contango"
                     break
             date_to_regime[d] = regime
-        regime_all = entry_dates.map(date_to_regime)
+        regime_all = entry_dates.apply(lambda d: date_to_regime.get(pd.Timestamp(d)))
 
         for adx_th in ADX_THRESHOLDS:
             mask = (df["adx"] > adx_th) & (dist_r >= 0) & trend_ampio_ok
@@ -189,7 +190,7 @@ def main():
             esiti = {"contango": {"TARGET": 0, "STOP": 0}, "backwardation": {"TARGET": 0, "STOP": 0}}
             for pos in positions:
                 regime = regime_all.iloc[pos]
-                if regime is None:
+                if regime is None or (isinstance(regime, float) and pd.isna(regime)):
                     continue
                 esito = simulate_outcome(df, pos, direction.iloc[pos])
                 if esito in ("TARGET", "STOP"):
