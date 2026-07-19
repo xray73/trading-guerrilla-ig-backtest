@@ -1,19 +1,16 @@
-name: Analyze VIX Per Trade
+name: Analyze VIX Per Trade (v3 - soglie ADX multiple)
 
-# Test a livello di SINGOLO TRADE (non media di periodo): unisce il
-# VIX giornaliero al bucket bloccato DAX (ADX>30 + ATR%>=0.25) per
-# data esatta, calcola il win rate reale (stop/target fissi) per
-# fascia VIX (calmo / medio / panico). Verifica se l'ipotesi "giorni
-# né calmi né in panico sono peggiori" regge a livello di trade
-# singolo, non solo nelle medie per periodo (che si sono già rivelate
-# fuorvianti una volta oggi, con lo spread EMA). Nessuna scrittura su D1.
+# v3: testa la robustezza dell'ipotesi VIX rispetto alla soglia ADX
+# usata per selezionare la popolazione (20/25/30/35/40), su entrambi
+# gli strumenti, con metodologia stop/target reale (48 barre).
+# Nessuna scrittura su D1.
 on:
   workflow_dispatch: {}
 
 jobs:
-  vix-per-trade:
+  vix-per-trade-v3:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repo
@@ -27,7 +24,7 @@ jobs:
       - name: Installa dipendenze
         run: pip install yfinance pandas numpy requests
 
-      - name: Analizza VIX per trade
+      - name: Analizza VIX per trade (v3)
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -37,7 +34,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vix-per-trade-${{ github.run_id }}
+          name: vix-per-trade-v3-${{ github.run_id }}
           path: results/
           retention-days: 30
           if-no-files-found: warn
