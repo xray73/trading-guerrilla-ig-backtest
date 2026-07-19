@@ -1,0 +1,42 @@
+name: Analyze Fold2 Bootstrap 2021
+
+# Bootstrap + test di permutazione sul gap Q4-resto DAX per
+# 2021/2022/2023: quantifica se il -3.73pt del 2021 (AUC=0.505) e'
+# distinguibile dal rumore atteso per un anno senza vero potere
+# predittivo, o rientra nell'incertezza campionaria. Nessun criterio
+# fissato, solo dati da discutere. Nessuna scrittura su D1, nessuna
+# modifica a engine.py/live_execute.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  fold2-bootstrap-2021:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests yfinance scikit-learn
+
+      - name: Bootstrap DAX 2021/2022/2023
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_fold2_bootstrap_2021.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fold2-bootstrap-2021-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
