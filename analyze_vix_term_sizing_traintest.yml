@@ -1,0 +1,40 @@
+name: Analyze VIX Term Sizing Train Test
+
+# Test train/test rigoroso: modulazione size basata su contango/
+# backwardation (VIX vs VIX3M), moltiplicatori calibrati SOLO su
+# 2015-2023, verificati alla cieca su 2024-2026. Popolazione:
+# contesto V6 vero. Nessuna scrittura su D1.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  vix-term-sizing-traintest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas numpy requests
+
+      - name: Test train/test modulazione contango/backwardation
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_vix_term_sizing_traintest.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vix-term-sizing-traintest-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
