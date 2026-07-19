@@ -2,67 +2,79 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
+AGGIORNAMENTO 19/07/2026 — PROTEZIONE ACCANTONATO (tetto equity reale +
+valvola), sostituisce il gap discusso in chat il 19/07 ("l'accantonato
+è protetto solo sulla carta, non nella realtà del conto"):
+
+  LIVELLO 1 — Tetto (continuo, ogni ciclo, sia per V6 che per MR):
+    capitale_investibile_totale = max(0, equity_reale_IG - accantonato)
+    Se capital_v6 + capital_mr tracciato in D1 supera questo tetto (per
+    drift tra il PnL calcolato internamente e l'equity reale — es. costi
+    di funding non modellati, arrotondamenti, o qualunque altra causa),
+    i due pool vengono scalati proporzionalmente per rientrarci.
+    Richiede una chiamata a ig_client.get_account_balance() ad ogni ciclo
+    — equity reale = balance + profit_loss (realizzato + floating aperto,
+    NON 'balance' da solo che ignora le posizioni aperte, NON 'available'
+    che sottrae anche il margine).
+
+  LIVELLO 2 — Valvola (scatta SOLO quando serve per la size minima):
+    budget_periodo = 20% × accantonato_corrente (VALVOLA_PCT)
+    consumato_periodo si azzera SOLO se l'accantonato del nuovo periodo
+    (mensile, stesso ciclo del consolidamento) è maggiore
+    dell'accantonato di riferimento dell'ultimo reset — altrimenti
+    persiste invariato (il budget non consumato NON si accumula né si
+    perde, resta disponibile finché non scatta un reset).
+    Preleva ESATTAMENTE l'importo che serve per raggiungere la size
+    minima negoziabile, mai più del budget residuo del periodo.
+    Se il budget non basta (parziale o esaurito): fallback al
+    comportamento attuale per quella strategia — V6 forza comunque al
+    minimo, MR salta comunque il trade.
+    L'importo prelevato dalla valvola diventa capitale vero del pool
+    (si somma a capital_v6/capital_mr) — torna esposto a guadagni/perdite
+    futuri come il resto del capitale, non è protetto una seconda volta.
+
+    x=20% scelto dopo simulazione sintetica dedicata (non sui dati
+    storici del motore — testa il meccanismo di money management in
+    isolamento, non il segnale): nello scenario "near-miss" (gap
+    tipico ~100-150EUR, il caso realistico per questo progetto — RCA
+    sez.15/24) copre il 100% dei casi senza sprecare budget; sotto il
+    15% non basta quasi mai, sopra il 20% non aggiunge beneficio (il
+    surplus resta semplicemente inutilizzato). Nello scenario di stress
+    profondo (gap ~500EUR, capitale crollato molto sotto la norma)
+    nessun x ragionevole basta — la valvola è un ponte per un piccolo
+    scarto vicino al minimo, non un salvagente per un crollo di
+    capitale; in quel caso resta il fallback attuale, invariato.
+    Non ancora validato su dati storici reali — solo simulazione
+    sintetica del meccanismo. Raffinare in Fase 2 se necessario.
+
+Il resto del file (split V6/MR, kill switch floating, accantonamento
+mensile) è INVARIATO dalla versione precedente — vedi commenti storici
+sotto per il contesto.
+
 AGGIORNAMENTO 18/07/2026 — INTEGRAZIONE MEAN-REVERSION:
-Il ciclo ora gestisce DUE strategie indipendenti, ciascuna col proprio
+Il ciclo gestisce DUE strategie indipendenti, ciascuna col proprio
 sotto-pool di capitale (split FISSO 70% V6 / 30% mean-reversion,
-deciso su 2.000€ reali — 1.400€/600€ iniziali):
+deciso su 2.000€ reali — 1.400€/600€ iniziali). I due pool sono trattati
+come conti virtuali COMPLETAMENTE indipendenti: slot concorrenti (max 2)
+e ordini/giorno (max 3) separati per pool, non condivisi.
 
-  - V6 (esistente, invariata): segnale eng.generate_signals(), forza
-    la size al minimo se sotto soglia (comportamento già validato).
-  - Mean-reversion (nuova): segnale generate_mean_reversion_signals()
-    variante RSI (selezionata dopo confronto con Bollinger, vedi RCA),
-    SALTA il trade se il rischio calcolato non copre la size minima
-    (stessa logica di engine_mean_reversion.py, replicata qui perché
-    live_execute.py non usa la classe BacktestEngine — calcola la size
-    manualmente).
-
-I due pool sono trattati come conti virtuali COMPLETAMENTE indipendenti:
-slot concorrenti (max 2) e ordini/giorno (max 3) separati per pool, non
-condivisi — stessa filosofia per cui il router combinato (capitale
-condiviso) è stato scartato in fase di backtest per il drawdown peggiore.
-V6 e mean-reversion POSSONO avere posizioni aperte sullo stesso
-strumento contemporaneamente (es. DAX long da V6 + DAX short da MR) —
-conseguenza diretta della separazione di capitale, già implicita nei
-backtest di split (due motori indipendenti sugli stessi dati).
-
-Accantonamento: rimane un meccanismo UNICO sul capitale COMBINATO
-(capital_current_v6 + capital_current_mr) — sul conto IG reale esiste
-un solo saldo, i due pool sono solo contabilità interna per il sizing.
-Quando scatta il consolidamento mensile, entrambi i pool vengono
-ridotti in proporzione al loro peso corrente (non forzati a tornare
-70/30 — lo split è fisso solo all'origine).
-
-AGGIORNAMENTO 18/07/2026 (2) — KILL SWITCH GIORNALIERO IMPLEMENTATO:
-Fino a questa versione, kill_switch_triggered_v6/mr veniva letto ma
-MAI calcolato (gap preesistente, segnalato in una sessione precedente
-e ora risolto). Nuova funzione check_and_apply_kill_switches():
-SEPARATO per pool (decisione esplicita 18/07/2026) — calcola perdita
-realizzata+floating rispetto al capitale di inizio giornata di
-ciascun pool; se supera kill_switch_threshold_pct (default -4%),
-blocca SOLO nuovi ordini per quel pool per il resto della giornata.
-Le posizioni già aperte NON vengono mai chiuse forzatamente — stessa
-scelta esplicita già validata in backtest per
-BacktestEngineFloatingKillSwitch (una chiusura forzata taglierebbe
-anche trade che potrebbero recuperare prima del proprio stop). Chiamata
-in main() subito dopo manage_open_positions() e prima della ricerca
-di nuovi segnali, così il PnL realizzato del ciclo è già aggiornato.
-
-LIMITE NOTO (identico al backtest): il check avviene una volta per
-ciclo (~30 min), non istante per istante — un affondo temporaneo che
-rientra prima del prossimo ciclo non viene visto.
+AGGIORNAMENTO 18/07/2026 (2) — KILL SWITCH GIORNALIERO FLOATING:
+check_and_apply_kill_switches() calcola perdita realizzata+floating
+rispetto al capitale di inizio giornata di ciascun pool; se supera
+kill_switch_threshold_pct (default -4%), blocca SOLO nuovi ordini per
+quel pool per il resto della giornata. Le posizioni già aperte NON
+vengono mai chiuse forzatamente.
 
 DRY_RUN=True di default (variabile d'ambiente DRY_RUN, default "true")
 — nessun ordine reale finché non viene impostata esplicitamente a
-"false". Invariato dalla versione precedente.
+"false".
 
 Ciclo ad ogni esecuzione (pensato per girare via cron ogni 30min):
-  1. Gestisce le posizioni aperte (V6 + MR indistintamente, la logica
-     di chiusura è identica — cambia solo verso quale pool instradare
-     il PnL, letto dal campo `strategy` della posizione).
+  1. Gestisce le posizioni aperte (V6 + MR).
   1b. Verifica kill switch giornaliero, separato per pool.
-  2. Rileva nuovi segnali V6 (logica invariata, ora blocca su
-     kill_switch_triggered_v6 realmente calcolato).
-  3. Rileva nuovi segnali mean-reversion RSI (idem per kill_switch_triggered_mr).
+  1c. Legge equity reale da IG, applica il tetto di Livello 1 (NUOVO).
+  2. Rileva nuovi segnali V6 (con valvola di Livello 2 se serve).
+  3. Rileva nuovi segnali mean-reversion RSI (idem).
 """
 
 from __future__ import annotations
@@ -84,6 +96,7 @@ CAPITAL0_DEFAULT = 2000.0
 SPLIT_V6_PCT = 0.70
 SPLIT_MR_PCT = 0.30
 MR_MODE = "rsi"  # variante selezionata, vedi RCA Addendum 17-18/07/2026 sez. 45
+VALVOLA_PCT = 0.20  # scelto 19/07/2026 dopo simulazione sintetica dedicata, vedi docstring
 SYMBOLS = {"DAX": INSTRUMENT_IDX_EUROPE_E_DAAX, "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100}
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
@@ -120,29 +133,33 @@ THRESHOLD_MULT = 1.5
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
-    """Accantonamento su capitale COMBINATO (v6+mr) — decisione esplicita
-    18/07/2026: sul conto IG reale esiste un solo saldo, i due pool sono
-    solo contabilità interna per il sizing. Quando scatta, i due pool
-    vengono ridotti in proporzione al loro peso corrente (split fisso
-    solo all'origine, non forzato a restare 70/30 nel tempo)."""
+    """Accantonamento su capitale COMBINATO (v6+mr). Aggiornata 19/07/2026
+    per gestire anche il reset della valvola (Livello 2): il budget si
+    rinnova SOLO se l'accantonato di questo mese supera quello di
+    riferimento dell'ultimo reset, altrimenti budget/consumato restano
+    invariati (persistono, non si azzerano né si accumulano)."""
     capital_v6 = prev_state.get("capital_current_v6")
     capital_mr = prev_state.get("capital_current_mr")
     if capital_v6 is None or capital_mr is None:
-        # riga legacy pre-migrazione: split dal capitale combinato secondo lo split iniziale
         legacy_capital = prev_state["capital_current"]
         capital_v6 = legacy_capital * SPLIT_V6_PCT
         capital_mr = legacy_capital * SPLIT_MR_PCT
 
+    accantonato = prev_state.get("accantonato", 0.0) or 0.0
+    valvola_budget = prev_state.get("valvola_budget", 0.0) or 0.0
+    valvola_consumato = prev_state.get("valvola_consumato", 0.0) or 0.0
+    valvola_accantonato_rif = prev_state.get("valvola_accantonato_riferimento", 0.0) or 0.0
+
     if not prev_state.get("accantonamento_attivo", 1):
         combined = capital_v6 + capital_mr
         return {
-            "capital_v6": capital_v6, "capital_mr": capital_mr,
-            "accantonato": prev_state.get("accantonato", 0.0) or 0.0,
+            "capital_v6": capital_v6, "capital_mr": capital_mr, "accantonato": accantonato,
             "reference": prev_state.get("consolidamento_reference") or combined,
             "threshold": prev_state.get("consolidamento_threshold") or combined * THRESHOLD_MULT,
+            "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
+            "valvola_accantonato_riferimento": valvola_accantonato_rif,
         }
 
-    accantonato = prev_state.get("accantonato", 0.0) or 0.0
     combined = capital_v6 + capital_mr
     reference = prev_state.get("consolidamento_reference") or combined
     threshold = prev_state.get("consolidamento_threshold") or (reference * THRESHOLD_MULT)
@@ -167,8 +184,25 @@ def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> d
                   f"({prev_month} -> {this_month}). Investito totale: {combined:.2f} "
                   f"(V6={capital_v6:.2f} MR={capital_mr:.2f})  Accantonato: {accantonato:.2f}")
 
-    return {"capital_v6": capital_v6, "capital_mr": capital_mr,
-            "accantonato": accantonato, "reference": reference, "threshold": threshold}
+        # --- reset valvola SOLO se l'accantonato e' cresciuto rispetto al riferimento ---
+        if accantonato > valvola_accantonato_rif:
+            vecchio_riferimento = valvola_accantonato_rif
+            valvola_budget = VALVOLA_PCT * accantonato
+            valvola_consumato = 0.0
+            valvola_accantonato_rif = accantonato
+            print(f"[valvola] Reset al cambio mese: accantonato {accantonato:.2f} > riferimento "
+                  f"precedente {vecchio_riferimento:.2f} -> nuovo budget {valvola_budget:.2f} EUR")
+        else:
+            print(f"[valvola] Nessun reset al cambio mese: accantonato {accantonato:.2f} non supera "
+                  f"il riferimento {valvola_accantonato_rif:.2f} -> budget/consumato invariati "
+                  f"({valvola_budget - valvola_consumato:.2f} EUR residui)")
+
+    return {
+        "capital_v6": capital_v6, "capital_mr": capital_mr, "accantonato": accantonato,
+        "reference": reference, "threshold": threshold,
+        "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
+        "valvola_accantonato_riferimento": valvola_accantonato_rif,
+    }
 
 
 def get_or_create_today_state(today_str: str) -> dict:
@@ -183,25 +217,34 @@ def get_or_create_today_state(today_str: str) -> dict:
         start_v6, start_mr = updated["capital_v6"], updated["capital_mr"]
         starting_accantonato = updated["accantonato"]
         reference, threshold = updated["reference"], updated["threshold"]
+        valvola_budget = updated["valvola_budget"]
+        valvola_consumato = updated["valvola_consumato"]
+        valvola_accantonato_rif = updated["valvola_accantonato_riferimento"]
     else:
         start_v6 = CAPITAL0_DEFAULT * SPLIT_V6_PCT
         start_mr = CAPITAL0_DEFAULT * SPLIT_MR_PCT
         starting_accantonato = 0.0
         reference = CAPITAL0_DEFAULT
         threshold = CAPITAL0_DEFAULT * THRESHOLD_MULT
+        valvola_budget = 0.0
+        valvola_consumato = 0.0
+        valvola_accantonato_rif = 0.0
 
     combined = start_v6 + start_mr
     d1_query(
         "INSERT INTO live_daily_state "
         "(trade_date, account_type, capital_start_of_day, capital_current, "
         "capital_start_of_day_v6, capital_current_v6, capital_start_of_day_mr, capital_current_mr, "
-        "accantonato, consolidamento_reference, consolidamento_threshold, accantonamento_attivo) "
+        "accantonato, consolidamento_reference, consolidamento_threshold, accantonamento_attivo, "
+        "valvola_budget, valvola_consumato, valvola_accantonato_riferimento) "
         f"VALUES ('{today_str}', 'demo', {combined}, {combined}, "
         f"{start_v6}, {start_v6}, {start_mr}, {start_mr}, "
-        f"{starting_accantonato}, {reference}, {threshold}, 1)"
+        f"{starting_accantonato}, {reference}, {threshold}, 1, "
+        f"{valvola_budget}, {valvola_consumato}, {valvola_accantonato_rif})"
     )
     print(f"Creato nuovo record live_daily_state per {today_str}: "
-          f"V6={start_v6:.2f} EUR, MR={start_mr:.2f} EUR, accantonato={starting_accantonato:.2f} EUR")
+          f"V6={start_v6:.2f} EUR, MR={start_mr:.2f} EUR, accantonato={starting_accantonato:.2f} EUR, "
+          f"valvola budget/consumato={valvola_budget:.2f}/{valvola_consumato:.2f} EUR")
     return {
         "trade_date": today_str, "account_type": "demo",
         "capital_current_v6": start_v6, "capital_current_mr": start_mr,
@@ -210,11 +253,95 @@ def get_or_create_today_state(today_str: str) -> dict:
         "orders_today_v6": 0, "orders_today_mr": 0,
         "kill_switch_triggered_v6": 0, "kill_switch_triggered_mr": 0,
         "kill_switch_threshold_pct": -4.0,
+        "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
+        "valvola_accantonato_riferimento": valvola_accantonato_rif,
     }
 
 
 def get_today_state(today_str: str) -> dict:
     return get_or_create_today_state(today_str)
+
+
+def apply_equity_cap(session: IGSession, today_str: str) -> dict:
+    """LIVELLO 1 (nuovo 19/07/2026): legge l'equity reale da IG e applica
+    il tetto capitale_investibile_totale = max(0, equity - accantonato).
+    Se capital_v6+capital_mr tracciato in D1 supera il tetto, scala
+    entrambi i pool proporzionalmente per rientrarci e persiste la
+    correzione. Ritorna lo stato del giorno aggiornato (dopo eventuale
+    scaling) insieme a equity/capitale_investibile per logging."""
+    day_state = get_today_state(today_str)
+    try:
+        bal = session.get_account_balance()
+        equity_reale = bal["equity"]
+    except Exception as e:
+        print(f"[tetto L1] impossibile leggere l'equity reale da IG ({e}) — "
+              f"salto il controllo questo ciclo, uso i valori D1 esistenti senza modifiche.")
+        return day_state
+
+    accantonato = day_state.get("accantonato", 0.0) or 0.0
+    capitale_investibile_totale = max(0.0, equity_reale - accantonato)
+
+    capital_v6 = day_state.get("capital_current_v6") or 0.0
+    capital_mr = day_state.get("capital_current_mr") or 0.0
+    combined = capital_v6 + capital_mr
+
+    if combined > capitale_investibile_totale + 0.01:  # tolleranza arrotondamento
+        fraction = capitale_investibile_totale / combined if combined > 0 else 0.0
+        new_v6 = capital_v6 * fraction
+        new_mr = capital_mr * fraction
+        print(f"[tetto L1] *** SCALING *** capitale tracciato ({combined:.2f}) supera "
+              f"equity-accantonato ({capitale_investibile_totale:.2f}) — "
+              f"riduco V6 {capital_v6:.2f}->{new_v6:.2f}, MR {capital_mr:.2f}->{new_mr:.2f}")
+        d1_query(
+            f"UPDATE live_daily_state SET capital_current_v6 = {new_v6}, "
+            f"capital_current_mr = {new_mr}, equity_reale_ultima = {equity_reale}, "
+            f"capitale_investibile_totale = {capitale_investibile_totale} "
+            f"WHERE trade_date = '{today_str}'"
+        )
+        day_state["capital_current_v6"] = new_v6
+        day_state["capital_current_mr"] = new_mr
+    else:
+        d1_query(
+            f"UPDATE live_daily_state SET equity_reale_ultima = {equity_reale}, "
+            f"capitale_investibile_totale = {capitale_investibile_totale} "
+            f"WHERE trade_date = '{today_str}'"
+        )
+        print(f"  [tetto L1] equity={equity_reale:.2f}  accantonato={accantonato:.2f}  "
+              f"capitale_investibile_totale={capitale_investibile_totale:.2f}  "
+              f"(capitale tracciato={combined:.2f}, entro il tetto)")
+
+    return day_state
+
+
+def try_valvola(today_str: str, day_state: dict, risk_amount_needed_for_min: float,
+                 pool_capital: float, risk_pct: float) -> tuple[float, bool]:
+    """LIVELLO 2 (nuovo 19/07/2026): se il capitale del pool non basta a
+    raggiungere la size minima, preleva dal budget residuo della valvola
+    ESATTAMENTE quanto serve (mai di più). Ritorna (nuovo_capitale_pool,
+    budget_ancora_insufficiente). Aggiorna valvola_consumato in D1 se
+    avviene un prelievo."""
+    extra_capital_needed = risk_amount_needed_for_min / risk_pct - pool_capital
+    if extra_capital_needed <= 0:
+        return pool_capital, False  # non serve la valvola
+
+    budget = day_state.get("valvola_budget", 0.0) or 0.0
+    consumato = day_state.get("valvola_consumato", 0.0) or 0.0
+    budget_residuo = max(0.0, budget - consumato)
+
+    draw = min(extra_capital_needed, budget_residuo)
+    if draw > 0:
+        nuovo_consumato = consumato + draw
+        d1_query(
+            f"UPDATE live_daily_state SET valvola_consumato = {nuovo_consumato} "
+            f"WHERE trade_date = '{today_str}'"
+        )
+        day_state["valvola_consumato"] = nuovo_consumato
+        print(f"    [valvola] prelevati {draw:.2f} EUR (budget residuo ora "
+              f"{budget_residuo - draw:.2f}/{budget:.2f} EUR)")
+
+    nuovo_capitale = pool_capital + draw
+    ancora_insufficiente = (nuovo_capitale * risk_pct) < risk_amount_needed_for_min
+    return nuovo_capitale, ancora_insufficiente
 
 
 def manage_open_positions(session: IGSession, today_str: str):
@@ -297,21 +424,7 @@ def manage_open_positions(session: IGSession, today_str: str):
 
 
 def check_and_apply_kill_switches(session: IGSession, today_str: str):
-    """Kill switch giornaliero, SEPARATO per pool (decisione esplicita
-    18/07/2026). Calcola perdita realizzata+floating rispetto al
-    capitale di inizio giornata di ciascun pool; se supera la soglia
-    (kill_switch_threshold_pct, default -4%), blocca SOLO nuovi ordini
-    per quel pool per il resto della giornata — le posizioni già aperte
-    restano gestite dai loro stop/target/max_holding normali, MAI
-    chiuse forzatamente (stessa scelta esplicita di
-    engine_floating_kill_switch.py in backtest: una chiusura forzata
-    taglierebbe anche trade che potrebbero recuperare prima del
-    proprio stop).
-
-    LIMITE NOTO (identico al backtest): il check avviene una volta per
-    ciclo (~30 min), non istante per istante — un affondo temporaneo
-    che rientra prima del prossimo ciclo non viene visto.
-    """
+    """Kill switch giornaliero, SEPARATO per pool. INVARIATO dal 18/07/2026."""
     day_state = get_today_state(today_str)
     open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open'")
     threshold_pct = abs(day_state.get("kill_switch_threshold_pct") or -4.0) / 100.0
@@ -427,9 +540,17 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
         risk_amount = capital * inst.risk_pct
         size = risk_amount / (stop_distance_pts * inst.point_value)
         forced_min = False
+
         if size < inst.min_tradable_size:
-            size = inst.min_tradable_size
-            forced_min = True
+            risk_amount_needed = inst.min_tradable_size * stop_distance_pts * inst.point_value
+            capital, ancora_insufficiente = try_valvola(
+                today_str, day_state, risk_amount_needed, capital, inst.risk_pct)
+            risk_amount = capital * inst.risk_pct
+            size = risk_amount / (stop_distance_pts * inst.point_value)
+            if ancora_insufficiente or size < inst.min_tradable_size:
+                # fallback INVARIATO: forza comunque al minimo
+                size = inst.min_tradable_size
+                forced_min = True
 
         direction = "BUY" if sig == "long" else "SELL"
         print(f"  [V6/{name}] segnale {sig.upper()} — size={size:.2f} "
@@ -458,7 +579,8 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
             f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'v6')"
         )
         d1_query(
-            f"UPDATE live_daily_state SET orders_today_v6 = orders_today_v6 + 1 WHERE trade_date = '{today_str}'"
+            f"UPDATE live_daily_state SET orders_today_v6 = orders_today_v6 + 1, "
+            f"capital_current_v6 = {capital} WHERE trade_date = '{today_str}'"
         )
         print(f"    Posizione V6 aperta su IG, deal_id={deal_id}")
 
@@ -466,10 +588,8 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
 def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: dict):
     """Identica a detect_and_open_signals_v6 nella struttura, con due
     differenze intenzionali: segnale generate_mean_reversion_signals()
-    variante RSI, e size che SALTA (non forza) sotto il minimo —
-    replica qui la stessa logica di engine_mean_reversion.py, che non
-    può essere riusata direttamente perché live_execute.py non usa la
-    classe BacktestEngine per il sizing (calcolo manuale, come V6)."""
+    variante RSI, e size che SALTA (non forza) sotto il minimo se la
+    valvola non basta a coprire il gap."""
     day_state = get_today_state(today_str)
     if day_state.get("kill_switch_triggered_mr"):
         print("[MR] Kill switch attivo oggi — nessun nuovo ordine.")
@@ -523,10 +643,18 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
         size = risk_amount / (stop_distance_pts * inst.point_value)
 
         if size < inst.min_tradable_size:
-            print(f"  [MR/{name}] segnale {sig.upper()} SALTATO — size calcolata {size:.3f} "
-                  f"sotto il minimo {inst.min_tradable_size} (capitale pool MR={capital:.2f} EUR "
-                  f"insufficiente per questo ATR). Comportamento intenzionale, vedi engine_mean_reversion.py.")
-            continue
+            risk_amount_needed = inst.min_tradable_size * stop_distance_pts * inst.point_value
+            capital, ancora_insufficiente = try_valvola(
+                today_str, day_state, risk_amount_needed, capital, inst.risk_pct)
+            risk_amount = capital * inst.risk_pct
+            size = risk_amount / (stop_distance_pts * inst.point_value)
+
+            if ancora_insufficiente or size < inst.min_tradable_size:
+                print(f"  [MR/{name}] segnale {sig.upper()} SALTATO — size calcolata {size:.3f} "
+                      f"sotto il minimo {inst.min_tradable_size} anche dopo la valvola "
+                      f"(capitale pool MR={capital:.2f} EUR insufficiente). "
+                      f"Comportamento intenzionale, vedi engine_mean_reversion.py.")
+                continue
 
         direction = "BUY" if sig == "long" else "SELL"
         print(f"  [MR/{name}] segnale {sig.upper()} — size={size:.2f} "
@@ -554,7 +682,8 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
             f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'mean_reversion')"
         )
         d1_query(
-            f"UPDATE live_daily_state SET orders_today_mr = orders_today_mr + 1 WHERE trade_date = '{today_str}'"
+            f"UPDATE live_daily_state SET orders_today_mr = orders_today_mr + 1, "
+            f"capital_current_mr = {capital} WHERE trade_date = '{today_str}'"
         )
         print(f"    Posizione MR aperta su IG, deal_id={deal_id}")
 
@@ -575,7 +704,9 @@ def main():
         print("\n--- 1b) Verifica kill switch giornaliero (separato per pool) ---")
         check_and_apply_kill_switches(session, today_str)
 
-        # un solo fetch Dukascopy per strumento, riusato da V6 e MR
+        print("\n--- 1c) Tetto equity reale (Livello 1, protezione accantonato) ---")
+        apply_equity_cap(session, today_str)
+
         print("\n--- 2) Scarico storico (riusato da entrambe le strategie) ---")
         now = datetime.now(timezone.utc)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
