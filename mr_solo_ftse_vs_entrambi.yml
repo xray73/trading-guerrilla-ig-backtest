@@ -1,0 +1,45 @@
+name: MR Solo FTSE100 vs Entrambi
+
+# Test di impatto (18/07/2026): mean-reversion RSI SOLO su FTSE100
+# contro mean-reversion su ENTRAMBI gli strumenti (configurazione
+# attuale), sui 5 periodi ufficiali, capitale 600 EUR (sotto-pool
+# mean-reversion reale, condiviso dinamicamente in "entrambi",
+# interamente dedicato a FTSE100 in "solo FTSE100"). Nessuna nuova
+# sottoclasse — confronta due configurazioni di
+# engine_mean_reversion.py già validato. Criterio di promozione
+# identico a quello già usato per i due filtri precedenti (nessun
+# peggioramento drawdown >20% relativo + PnL aggregato migliore).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  mr-solo-ftse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Test MR solo FTSE100 vs entrambi
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python mr_solo_ftse_vs_entrambi.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mr-solo-ftse-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
