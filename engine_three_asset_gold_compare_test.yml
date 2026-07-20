@@ -1,0 +1,40 @@
+name: Engine Three Asset Gold Compare Test
+
+# Confronto a 3 vie sui 5 periodi ufficiali: baseline (DAX+FTSE100),
+# +GOLD selezione a sola correlazione, +GOLD selezione con pavimento
+# ADX relativo. Verifica se il pavimento ADX corregge selettivamente
+# il caso 2020-covid (l'unico dove la correlazione pura ha scalzato
+# trade DAX/FTSE100 validi, vedi analyze_gold_isolation) senza
+# intaccare il guadagno netto degli altri 4 periodi. Nessuna scrittura
+# su D1, nessuna modifica a engine.py o alle altre sottoclassi.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  three-asset-gold-compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Confronto a 3 vie
+        run: python engine_three_asset_gold_compare_test.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: three-asset-gold-compare-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
