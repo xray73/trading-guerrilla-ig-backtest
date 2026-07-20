@@ -313,11 +313,27 @@ def main():
             favorable_candidates = []
             adverse_candidates = []
             for i in range(n_bars):
-                if i == n_bars - 1:
+                is_exit_bar = (i == n_bars - 1)
+                is_entry_bar = (i == 0)
+                if is_exit_bar:
                     # barra di uscita: unico punto valido = esito reale
                     r_val = float(t["r_multiple"])
                     favorable_candidates.append(r_val)
                     adverse_candidates.append(r_val)
+                elif is_entry_bar:
+                    # CORREZIONE 20/07/2026 (trovato con un caso reale, DAX
+                    # 13/06/2025, MFE fantasma 4.76R su un trade da 1.99R):
+                    # il motore controlla le condizioni di uscita delle
+                    # posizioni GIA' aperte PRIMA di aprirne di nuove nello
+                    # stesso ciclo — una posizione appena aperta non viene
+                    # MAI controllata per la chiusura sulla propria barra di
+                    # apertura, solo dal ciclo successivo. Qualunque
+                    # movimento intrabar (anche enorme, come in quel caso:
+                    # 283 punti nella sola barra di apertura) e' quindi
+                    # invisibile al motore su quella barra specifica — stesso
+                    # trattamento della barra di uscita, dal lato opposto.
+                    favorable_candidates.append(0.0)
+                    adverse_candidates.append(0.0)
                 else:
                     bar = path.iloc[i]
                     if direction == "long":
