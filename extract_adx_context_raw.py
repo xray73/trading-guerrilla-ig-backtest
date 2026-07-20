@@ -1,202 +1,336 @@
 """
-extract_adx_context_raw.py — Estrazione dati grezzi, v4 (18/07/2026).
+extract_v6_trade_features.py — Estrae, per OGNI trade V6 generato sui 5
+periodi ufficiali (DAX+FTSE100), un set ricco di feature su come si è
+formato il segnale e come si è sviluppato il trend durante la posizione.
+Scrive tutto in due tabelle D1 dedicate (mai le tabelle ufficiali
+trades/backtest_runs), cosi' le prossime analisi sono query, non nuovi
+backtest.
 
-AGGIUNTA v4: RSI(14) e Bollinger Bands (20 periodi, 2 dev std) — gli
-indicatori REALI usati dalla mean-reversion (mean_reversion_signals.py),
-necessari per verificare se la scoperta "FTSE100 reverte meglio di DAX
-a bassissimo ADX" (trovata usando EMA50 come proxy grezzo della media)
-regge anche con l'indicatore vero (RSI) che il sistema userebbe
-davvero in produzione.
+ANALISI NEUTRA (nessun filtro proposto, nessuna classificazione
+vinc/perso applicata qui) — solo estrazione. Le domande su cosa
+distingue i trade si fanno DOPO, in query separate sul dataset.
 
-Funzioni RSI/Bollinger IMPORTATE da mean_reversion_signals.py, non
-reimplementate — stessa metodologia "nessun parametro nuovo inventato"
-già seguita per ADX/EMA/ATR/breakout.
+Tabelle create (IF NOT EXISTS):
 
-Storico continuo 2015-2026 via Dukascopy diretto. Scrive SOLO nella
-tabella diagnostica adx_diagnostic_raw (ricreata da zero, scratch
-table, non tocca ohlc_prices).
+research_v6_trade_features (1 riga per trade):
+  trade_key (PK naturale: instrument + entry_time ISO)
+  periodo, instrument, direction, entry_time, exit_time, exit_reason,
+  pnl, r_multiple, risk_amount, size, forced_min_size,
+  adx_at_entry, atr_at_entry,
+  ema_fast_entry, ema_slow_entry, ema_broad_fast_entry, ema_broad_slow_entry,
+  close_entry, breakout_level_entry, breakout_distance_pts,
+  persistence_bars,       -- barre consecutive di segnale prima dell'ingresso
+  adx_regime_age_bars,    -- barre consecutive con adx>20 prima dell'ingresso
+  hold_bars,              -- durata trade in barre da 30min
+  adx_at_exit, adx_max, adx_max_bar_offset, adx_min, adx_slope_per_bar,
+  mfe_r, mfe_bar_offset,  -- massima escursione favorevole (R) e quando
+  mae_r, mae_bar_offset,  -- massima escursione avversa (R) e quando
+  extraction_run_at
 
-Schema completo v4 (base + v2 + v3 + v4):
-  symbol, bar_index, timestamp, close, high, low,
-  adx, ema20, ema50, ema100, ema200, atr,
-  rolling_high_20, rolling_low_20, rolling_high_40, rolling_low_40,
-  trend_duration_adx20,
-  rsi14, bb_upper, bb_mid, bb_lower   [NUOVI v4]
+research_v6_trade_path (1 riga per trade per barra, entrata->uscita):
+  trade_key, bar_offset, timestamp, close, price_r, adx, ema_fast, ema_slow
+
+Nessuna scrittura su trades/backtest_runs/live_*. Nessuna modifica a
+engine.py o alle sottoclassi.
 """
 
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-
-import dukascopy_python
-from dukascopy_python.instruments import INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100
-from datetime import datetime, timezone
+import requests
 
 import engine as eng
-from mean_reversion_signals import _rsi_wilder, _bollinger_bands, RSI_PERIOD, BB_PERIOD, BB_STD
+from engine_floating_kill_switch import BacktestEngineFloatingKillSwitch
 
-DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
-API_BASE = "https://api.cloudflare.com/client/v4/accounts"
-INSERT_BATCH = 250  # ridotto ulteriormente per via delle 4 colonne aggiuntive
+CAPITAL0 = 2000.0
+SYMBOLS = ["DAX", "FTSE100"]
+D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
+D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+INSERT_CHUNK = 300
 
-SYMBOLS = {"DAX": INSTRUMENT_IDX_EUROPE_E_DAAX, "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100}
-FETCH_START = datetime(2015, 1, 1, tzinfo=timezone.utc)
-FETCH_END = datetime(2026, 7, 19, tzinfo=timezone.utc)
+PERIODS = [
+    ("2015-2016", "2015-01-05", "2016-12-29"),
+    ("2020-covid", "2020-01-02", "2020-12-30"),
+    ("2023", "2023-01-02", "2023-12-30"),
+    ("2024-2025", "2024-01-03", "2025-12-31"),
+    ("2026-ytd", "2026-01-05", None),
+]
 
-NEVER_TESTED_YEARS = {2017, 2018, 2019, 2021, 2022}
 
-
-def d1_query(sql: str, account_id: str, token: str) -> list[dict]:
-    import requests
-    url = f"{API_BASE}/{account_id}/d1/database/{DATABASE_ID}/query"
+def d1_query(sql: str, account_id: str, token: str) -> tuple[list[dict], dict]:
+    url = f"{D1_API_BASE}/{account_id}/d1/database/{D1_DATABASE_ID}/query"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     resp = requests.post(url, headers=headers, json={"sql": sql}, timeout=60)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        # FIX 20/07/2026: un 400/413 qui e' quasi sempre un limite di
+        # dimensione a livello HTTP/gateway Cloudflare, DIVERSO dal
+        # SQLITE_TOOBIG che D1 restituisce con status 200+success:false.
+        # Prima veniva lasciato propagare come HTTPError "grezzo", che
+        # insert_chunked_adaptive (sotto) non intercettava perche'
+        # ascoltava solo RuntimeError — lo script crashava invece di
+        # dimezzare il chunk. Ora tutto passa da RuntimeError con il
+        # testo della risposta incluso, cosi' il retry lo vede.
+        raise RuntimeError(f"D1 HTTP {resp.status_code}: {resp.text[:500]}") from e
     data = resp.json()
     if not data.get("success"):
-        raise RuntimeError(f"D1 query fallita: {data.get('errors')}")
-    return data["result"][0]["results"]
+        raise RuntimeError(f"Query D1 fallita: {data.get('errors')}")
+    block = data["result"][0]
+    return block["results"], block.get("meta", {})
 
 
-def fetch_full(symbol_const) -> pd.DataFrame:
-    df = dukascopy_python.fetch(
-        symbol_const, dukascopy_python.INTERVAL_MIN_30, dukascopy_python.OFFER_SIDE_BID,
-        FETCH_START, FETCH_END,
-    ).reset_index()
-    ts_col = df.columns[0]
-    df = df.rename(columns={ts_col: "timestamp"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
+def ensure_tables(account_id: str, token: str):
+    d1_query("""
+        CREATE TABLE IF NOT EXISTS research_v6_trade_features (
+          trade_key TEXT PRIMARY KEY,
+          periodo TEXT NOT NULL,
+          instrument TEXT NOT NULL,
+          direction TEXT NOT NULL,
+          entry_time TEXT NOT NULL,
+          exit_time TEXT,
+          exit_reason TEXT,
+          pnl REAL,
+          r_multiple REAL,
+          risk_amount REAL,
+          size REAL,
+          forced_min_size INTEGER,
+          adx_at_entry REAL,
+          atr_at_entry REAL,
+          ema_fast_entry REAL,
+          ema_slow_entry REAL,
+          ema_broad_fast_entry REAL,
+          ema_broad_slow_entry REAL,
+          close_entry REAL,
+          breakout_level_entry REAL,
+          breakout_distance_pts REAL,
+          persistence_bars INTEGER,
+          adx_regime_age_bars INTEGER,
+          hold_bars INTEGER,
+          adx_at_exit REAL,
+          adx_max REAL,
+          adx_max_bar_offset INTEGER,
+          adx_min REAL,
+          adx_slope_per_bar REAL,
+          mfe_r REAL,
+          mfe_bar_offset INTEGER,
+          mae_r REAL,
+          mae_bar_offset INTEGER,
+          extraction_run_at TEXT
+        )
+    """, account_id, token)
+
+    d1_query("""
+        CREATE TABLE IF NOT EXISTS research_v6_trade_path (
+          trade_key TEXT NOT NULL,
+          bar_offset INTEGER NOT NULL,
+          timestamp TEXT NOT NULL,
+          close REAL,
+          price_r REAL,
+          adx REAL,
+          ema_fast REAL,
+          ema_slow REAL
+        )
+    """, account_id, token)
+    print("Tabelle research_v6_trade_features / research_v6_trade_path pronte (create se mancanti).")
 
 
-def compute_trend_duration(adx: pd.Series, threshold: float = 20.0) -> pd.Series:
-    above = (adx > threshold)
-    block_id = (above != above.shift()).cumsum()
-    streak = above.groupby(block_id).cumcount() + 1
-    return np.where(above, streak, 0)
+def fmt_val(v):
+    """Converte un valore in stringa SQL, arrotondando i float a 6 decimali
+    per tenere le righe corte (payload piu' piccolo = meno rischio di
+    superare il limite di lunghezza query D1, vedi insert_chunked_adaptive)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "NULL"
+    if isinstance(v, str):
+        return "'" + v.replace("'", "''") + "'"
+    if isinstance(v, float):
+        return f"{v:.6f}"
+    return str(v)
 
 
-def recreate_table(account_id: str, token: str):
-    d1_query("DROP TABLE IF EXISTS adx_diagnostic_raw", account_id, token)
-    d1_query(
-        "CREATE TABLE adx_diagnostic_raw ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  symbol TEXT NOT NULL,"
-        "  bar_index INTEGER NOT NULL,"
-        "  timestamp TEXT NOT NULL,"
-        "  close REAL NOT NULL,"
-        "  high REAL NOT NULL,"
-        "  low REAL NOT NULL,"
-        "  adx REAL,"
-        "  ema20 REAL,"
-        "  ema50 REAL,"
-        "  ema100 REAL,"
-        "  ema200 REAL,"
-        "  atr REAL,"
-        "  rolling_high_20 REAL,"
-        "  rolling_low_20 REAL,"
-        "  rolling_high_40 REAL,"
-        "  rolling_low_40 REAL,"
-        "  trend_duration_adx20 INTEGER,"
-        "  rsi14 REAL,"
-        "  bb_upper REAL,"
-        "  bb_mid REAL,"
-        "  bb_lower REAL,"
-        "  UNIQUE(symbol, bar_index)"
-        ")",
-        account_id, token,
-    )
+def insert_chunked_adaptive(df: pd.DataFrame, table: str, account_id: str, token: str,
+                             start_chunk: int = 300, min_chunk: int = 5) -> int:
+    """Inserisce df in `table` a blocchi, dimezzando automaticamente la
+    dimensione del blocco se D1 risponde SQLITE_TOOBIG (statement too
+    long) — invece di indovinare una dimensione fissa che potrebbe
+    rompersi di nuovo con piu' colonne o dataset futuri piu' grandi."""
+    cols = list(df.columns)
+    total_written = 0
+    i = 0
+    chunk_size = start_chunk
+    while i < len(df):
+        chunk = df.iloc[i:i + chunk_size]
+        values = ", ".join(
+            f"({', '.join(fmt_val(r[c]) for c in cols)})" for _, r in chunk.iterrows()
+        )
+        sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES {values}"
+        try:
+            _results, meta = d1_query(sql, account_id, token)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            too_big = ("sqlite_toobig" in msg or "statement too long" in msg
+                       or "d1 http 400" in msg or "d1 http 413" in msg
+                       or "too large" in msg or "payload too large" in msg)
+            if too_big:
+                if chunk_size <= min_chunk:
+                    raise RuntimeError(f"Chunk gia' al minimo ({min_chunk}) ma ancora troppo lungo — "
+                                        f"controllare il numero di colonne di {table}.")
+                chunk_size = max(chunk_size // 2, min_chunk)
+                print(f"  [{table}] statement troppo lungo ({str(e)[:150]}), riduco chunk a {chunk_size} e riprovo...")
+                continue  # NON avanza i, riprova lo stesso blocco di dati con chunk piu' piccolo
+            raise
+        changes = meta.get("changes", 0)
+        if changes == 0 and len(chunk) > 0:
+            print(f"  ATTENZIONE [{table}]: chunk di {len(chunk)} righe inviato ma changes=0 — verificare.")
+        total_written += changes
+        i += len(chunk)
+        time.sleep(0.1)
+    return total_written
+
+
+def slice_period(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    return df[(df["timestamp"] >= start) & (df["timestamp"] < end)].reset_index(drop=True)
+
+
+def count_consecutive_backward(bool_series: pd.Series, end_idx: int) -> int:
+    """Conta True consecutivi in bool_series terminando (incluso) a end_idx,
+    andando all'indietro."""
+    i = end_idx
+    count = 0
+    while i >= 0 and bool(bool_series.iloc[i]):
+        count += 1
+        i -= 1
+    return count
 
 
 def main():
-    token = os.environ.get("CLOUDFLARE_API_TOKEN")
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-    if not token or not account_id:
-        print("ERRORE: CLOUDFLARE_API_TOKEN o CLOUDFLARE_ACCOUNT_ID mancanti.")
+    token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not account_id or not token:
+        print("ERRORE: CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN mancanti.")
         return
 
-    print("=== Estrazione dati grezzi v4 (+ RSI/Bollinger) — storico continuo 2015-2026 ===\n")
-    print(f"RSI period={RSI_PERIOD}, Bollinger period={BB_PERIOD} std={BB_STD} "
-          f"(importati da mean_reversion_signals.py, nessun parametro nuovo)\n")
+    from ohlc_data_source import get_ohlc
 
-    recreate_table(account_id, token)
-    print("Tabella adx_diagnostic_raw ricreata con schema v4.\n")
+    ensure_tables(account_id, token)
 
-    total_rows = 0
-    for symbol, const in SYMBOLS.items():
-        print(f"Scarico {symbol} da Dukascopy (2015-2026 continuo)...")
-        df = fetch_full(const)
-        if df.empty:
-            print(f"  [{symbol}] ERRORE: nessun dato ritornato.")
+    print("\nScarico/aggiorno storico DAX/FTSE100...")
+    raw = {name: get_ohlc(name, account_id, token, log=print) for name in SYMBOLS}
+    signals_full = {name: eng.generate_signals(raw[name], eng.INSTRUMENTS[name]) for name in SYMBOLS}
+    print("Fatto.\n")
+
+    extraction_ts = datetime.now(timezone.utc).isoformat()
+    feature_rows = []
+    path_rows = []
+
+    for label, start_str, end_str in PERIODS:
+        start = pd.Timestamp(start_str, tz="UTC")
+        end = pd.Timestamp(end_str, tz="UTC") + pd.Timedelta(days=1) if end_str else pd.Timestamp.now(tz="UTC")
+        print(f"--- Periodo {label} ---")
+
+        sig_period = {name: slice_period(signals_full[name], start, end) for name in SYMBOLS}
+
+        engine_run = BacktestEngineFloatingKillSwitch(capital0=CAPITAL0, instruments=eng.INSTRUMENTS)
+        trades_df, _ = engine_run.run(sig_period)
+        if trades_df.empty:
+            print("  Nessun trade in questo periodo.")
             continue
+        print(f"  {len(trades_df)} trade — estraggo feature...")
 
-        years_present = set(df["timestamp"].dt.year.unique())
-        missing = NEVER_TESTED_YEARS - years_present
-        if missing:
-            print(f"  [{symbol}] ATTENZIONE: mancano {sorted(missing)}.")
+        for _, t in trades_df.iterrows():
+            inst = t["instrument"]
+            sdf = signals_full[inst]  # serie COMPLETA (non tagliata al periodo) per contesto storico corretto
+            direction = t["direction"]
 
-        df["adx"] = eng.adx_wilder(df, 14)
-        df["ema20"] = eng.ema(df["close"], 20)
-        df["ema50"] = eng.ema(df["close"], 50)
-        df["ema100"] = eng.ema(df["close"], 100)
-        df["ema200"] = eng.ema(df["close"], 200)
-        df["atr"] = eng.atr_wilder(df, 14)
-        df["rolling_high_20"] = df["high"].shift(1).rolling(20).max()
-        df["rolling_low_20"] = df["low"].shift(1).rolling(20).min()
-        df["rolling_high_40"] = df["high"].shift(1).rolling(40).max()
-        df["rolling_low_40"] = df["low"].shift(1).rolling(40).min()
-        df["trend_duration_adx20"] = compute_trend_duration(df["adx"], 20.0)
+            signal_bar_ts = t["entry_time"] - pd.Timedelta(minutes=eng.PARAMS.bar_minutes)
+            sig_idx_arr = sdf.index[sdf["timestamp"] == signal_bar_ts]
+            if len(sig_idx_arr) == 0:
+                continue
+            sig_idx = sig_idx_arr[0]
+            sig_bar = sdf.loc[sig_idx]
 
-        # --- nuovi v4, funzioni riusate da mean_reversion_signals.py ---
-        df["rsi14"] = _rsi_wilder(df, RSI_PERIOD)
-        bb_upper, bb_mid, bb_lower = _bollinger_bands(df, BB_PERIOD, BB_STD)
-        df["bb_upper"], df["bb_mid"], df["bb_lower"] = bb_upper, bb_mid, bb_lower
+            persistence = count_consecutive_backward(sdf["signal"] == direction, sig_idx)
+            adx_regime_age = count_consecutive_backward(sdf["adx"] > eng.PARAMS.adx_min_context, sig_idx)
 
-        required_cols = ["adx", "ema20", "ema50", "ema100", "ema200", "atr",
-                          "rolling_high_20", "rolling_low_20", "rolling_high_40", "rolling_low_40",
-                          "rsi14", "bb_upper", "bb_mid", "bb_lower"]
-        df = df.dropna(subset=required_cols).reset_index(drop=True)
-        df["bar_index"] = range(len(df))
+            breakout_level = sig_bar["rolling_high"] if direction == "long" else sig_bar["rolling_low"]
+            breakout_dist = (sig_bar["close"] - breakout_level) if direction == "long" else (breakout_level - sig_bar["close"])
 
-        n = len(df)
-        print(f"  [{symbol}] {n} barre valide, {df['timestamp'].min()} -> {df['timestamp'].max()}")
+            # percorso bar-per-bar entrata -> uscita (inclusi entrambi gli estremi)
+            path_mask = (sdf["timestamp"] >= t["entry_time"]) & (sdf["timestamp"] <= t["exit_time"])
+            path = sdf.loc[path_mask].reset_index(drop=True)
+            if path.empty:
+                continue
 
-        cols = ["bar_index", "timestamp", "close", "high", "low", "adx", "ema20", "ema50",
-                "ema100", "ema200", "atr", "rolling_high_20", "rolling_low_20",
-                "rolling_high_40", "rolling_low_40", "trend_duration_adx20",
-                "rsi14", "bb_upper", "bb_mid", "bb_lower"]
-        records = df[cols].to_dict("records")
+            stop_distance = t["atr_at_entry"] * eng.INSTRUMENTS[inst].atr_multiplier
+            if direction == "long":
+                price_r = (path["close"] - t["entry_price"]) / stop_distance
+            else:
+                price_r = (t["entry_price"] - path["close"]) / stop_distance
 
-        for i in range(0, len(records), INSERT_BATCH):
-            batch = records[i:i + INSERT_BATCH]
-            values_sql = ",".join(
-                f"('{symbol}',{r['bar_index']},'{r['timestamp'].isoformat()}',"
-                f"{r['close']},{r['high']},{r['low']},{r['adx']},{r['ema20']},{r['ema50']},"
-                f"{r['ema100']},{r['ema200']},{r['atr']},"
-                f"{r['rolling_high_20']},{r['rolling_low_20']},"
-                f"{r['rolling_high_40']},{r['rolling_low_40']},"
-                f"{int(r['trend_duration_adx20'])},"
-                f"{r['rsi14']},{r['bb_upper']},{r['bb_mid']},{r['bb_lower']})"
-                for r in batch
-            )
-            d1_query(
-                "INSERT INTO adx_diagnostic_raw "
-                "(symbol, bar_index, timestamp, close, high, low, adx, ema20, ema50, "
-                "ema100, ema200, atr, rolling_high_20, rolling_low_20, "
-                "rolling_high_40, rolling_low_40, trend_duration_adx20, "
-                "rsi14, bb_upper, bb_mid, bb_lower) "
-                f"VALUES {values_sql}",
-                account_id, token,
-            )
-            if (i // INSERT_BATCH) % 40 == 0:
-                print(f"    ...{i + len(batch)}/{n} righe inserite")
+            trade_key = f"{inst}_{t['entry_time'].isoformat()}"
 
-        total_rows += n
-        print(f"  [{symbol}] completato: {n} righe inserite.\n")
+            mfe_bar_offset = int(price_r.idxmax())
+            mae_bar_offset = int(price_r.idxmin())
 
-    print(f"=== Completato. {total_rows} righe totali in adx_diagnostic_raw (schema v4). ===")
+            bar_offsets = np.arange(len(path))
+            adx_values = path["adx"].values
+            valid = ~np.isnan(adx_values)
+            adx_slope = float(np.polyfit(bar_offsets[valid], adx_values[valid], 1)[0]) if valid.sum() >= 2 else None
+
+            feature_rows.append({
+                "trade_key": trade_key, "periodo": label, "instrument": inst,
+                "direction": direction, "entry_time": t["entry_time"].isoformat(),
+                "exit_time": t["exit_time"].isoformat(), "exit_reason": t["exit_reason"],
+                "pnl": float(t["pnl"]), "r_multiple": float(t["r_multiple"]),
+                "risk_amount": float(t["risk_amount"]), "size": float(t["size"]),
+                "forced_min_size": int(bool(t["forced_min_size"])),
+                "adx_at_entry": float(t["adx_at_entry"]), "atr_at_entry": float(t["atr_at_entry"]),
+                "ema_fast_entry": float(sig_bar["ema_fast"]), "ema_slow_entry": float(sig_bar["ema_slow"]),
+                "ema_broad_fast_entry": float(sig_bar["ema_broad_fast"]), "ema_broad_slow_entry": float(sig_bar["ema_broad_slow"]),
+                "close_entry": float(sig_bar["close"]), "breakout_level_entry": float(breakout_level),
+                "breakout_distance_pts": float(breakout_dist),
+                "persistence_bars": persistence, "adx_regime_age_bars": adx_regime_age,
+                "hold_bars": len(path) - 1,
+                "adx_at_exit": float(path["adx"].iloc[-1]) if pd.notna(path["adx"].iloc[-1]) else None,
+                "adx_max": float(np.nanmax(adx_values)), "adx_max_bar_offset": int(np.nanargmax(adx_values)),
+                "adx_min": float(np.nanmin(adx_values)), "adx_slope_per_bar": adx_slope,
+                "mfe_r": float(price_r.max()), "mfe_bar_offset": mfe_bar_offset,
+                "mae_r": float(price_r.min()), "mae_bar_offset": mae_bar_offset,
+                "extraction_run_at": extraction_ts,
+            })
+
+            for i in range(len(path)):
+                path_rows.append({
+                    "trade_key": trade_key, "bar_offset": i,
+                    "timestamp": path["timestamp"].iloc[i].isoformat(),
+                    "close": float(path["close"].iloc[i]), "price_r": float(price_r.iloc[i]),
+                    "adx": float(path["adx"].iloc[i]) if pd.notna(path["adx"].iloc[i]) else None,
+                    "ema_fast": float(path["ema_fast"].iloc[i]) if pd.notna(path["ema_fast"].iloc[i]) else None,
+                    "ema_slow": float(path["ema_slow"].iloc[i]) if pd.notna(path["ema_slow"].iloc[i]) else None,
+                })
+
+    print(f"\nFeature estratte per {len(feature_rows)} trade, {len(path_rows)} righe di percorso totali.")
+    if not feature_rows:
+        print("Nessun dato da scrivere.")
+        return
+
+    print("\nScrivo research_v6_trade_features su D1...")
+    df_feat = pd.DataFrame(feature_rows)
+    total_written = insert_chunked_adaptive(df_feat, "research_v6_trade_features", account_id, token,
+                                             start_chunk=300)
+    print(f"  {total_written} righe scritte in research_v6_trade_features.")
+
+    print("\nScrivo research_v6_trade_path su D1...")
+    df_path = pd.DataFrame(path_rows)
+    total_written_p = insert_chunked_adaptive(df_path, "research_v6_trade_path", account_id, token,
+                                               start_chunk=300)
+    print(f"  {total_written_p} righe scritte in research_v6_trade_path.")
+
+    print(f"\n=== Completato. Dataset pronto per query future (nessun rilancio backtest necessario). ===")
 
 
 if __name__ == "__main__":
