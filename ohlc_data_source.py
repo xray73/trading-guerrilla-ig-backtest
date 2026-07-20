@@ -19,7 +19,23 @@ Simboli supportati: DAX, FTSE100, GOLD (estendibile aggiungendo a
 DUKASCOPY_CONST). Nessuna modifica a engine.py. Scrive SOLO righe nuove
 in ohlc_prices (mai UPDATE/DELETE su righe esistenti).
 
-FIX 20/07/2026 (RCA: bug insert silenzioso identificato in sessione,
+FIX 20/07/2026 (parte 2 — VALIDATO IN PRODUZIONE): il primo fix ha
+funzionato (D1 ora avanza davvero, confermato da un run reale che ha
+scritto fino al 2026-07-20T14:00), ma ha esposto un secondo bug a
+catena: le righe nuove venivano scritte con `row.timestamp.isoformat()`
+("2026-07-12T22:00:00+00:00", separatore T) mentre le righe storiche
+in D1 usano `"2026-07-10 19:30:00+00:00"` (separatore spazio, dal
+caricamento iniziale). `_read_full_from_d1` rilegge l'intera colonna
+con un unico `pd.to_datetime(..., utc=True)`, che prova a inferire UN
+formato per tutta la colonna e va in crash sul primo formato diverso
+incontrato (ValueError: "doesn't match format"). Due correzioni:
+  a) l'insert ora scrive nello stesso formato delle righe storiche
+     (spazio, non T) — coerenza per tutte le righe future
+  b) la lettura usa `format='mixed'` — cosi' resta robusta anche sulle
+     righe gia' scritte in formato T da run precedenti (incluso questo),
+     senza dover ripulire D1 a mano
+
+FIX 20/07/2026 parte 1 (RCA: bug insert silenzioso identificato in sessione,
 vedi 00_CURRENT_STATE.md sez. "OHLC cache bug" / RCA_Addendum del
 giorno): la INSERT ometteva le colonne NOT NULL `timeframe` e `source`
 (schema reale via PRAGMA table_info, mai verificato contro lo schema
@@ -126,7 +142,10 @@ def _insert_rows(symbol: str, df: pd.DataFrame, account_id: str, token: str) -> 
     for i in range(0, len(df), D1_INSERT_CHUNK):
         chunk = df.iloc[i:i + D1_INSERT_CHUNK]
         values = ", ".join(
-            f"('{symbol}', '{row.timestamp.isoformat()}', '{TIMEFRAME_LABEL}', "
+            # formato IDENTICO alle righe storiche esistenti ("2026-07-10 19:30:00+00:00",
+            # spazio non T) — vedi FIX 20/07/2026 parte 2 nel docstring del modulo,
+            # un formato diverso qui rompe la lettura a valle in _read_full_from_d1
+            f"('{symbol}', '{row.timestamp.strftime('%Y-%m-%d %H:%M:%S+00:00')}', '{TIMEFRAME_LABEL}', "
             f"{row.open}, {row.high}, {row.low}, {row.close}, 0, '{SOURCE_LABEL}')"
             for row in chunk.itertuples()
         )
@@ -166,7 +185,10 @@ def _read_full_from_d1(symbol: str, account_id: str, token: str) -> pd.DataFrame
             break
         time.sleep(0.1)
     df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    # format='mixed': D1 contiene sia righe storiche (spazio) sia, per un periodo,
+    # righe scritte col vecchio bug in formato T-separator (isoformat()) — vedi
+    # FIX 20/07/2026 parte 2. Robusto a entrambe senza dover ripulire D1 a mano.
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="mixed")
     for col in ("open", "high", "low", "close"):
         df[col] = df[col].astype(float)
     return df.sort_values("timestamp").reset_index(drop=True)
