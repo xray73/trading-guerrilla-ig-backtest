@@ -48,6 +48,11 @@ def _d1_query(sql: str, account_id: str, token: str) -> list[dict]:
     url = f"{D1_API_BASE}/{account_id}/d1/database/{D1_DATABASE_ID}/query"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     resp = requests.post(url, headers=headers, json={"sql": sql}, timeout=60)
+    if resp.status_code != 200:
+        # mostra il corpo della risposta PRIMA di sollevare, altrimenti
+        # raise_for_status() nasconde il motivo reale (es. errore SQL D1)
+        print(f"[ohlc_data_source] D1 ha risposto {resp.status_code}: {resp.text[:1000]}")
+        print(f"[ohlc_data_source] SQL che ha causato l'errore (primi 500 char): {sql[:500]}")
     resp.raise_for_status()
     data = resp.json()
     if not data.get("success"):
@@ -77,6 +82,15 @@ def _fetch_incremental_dukascopy(symbol_const, start: pd.Timestamp, end: pd.Time
 
 
 def _insert_rows(symbol: str, df: pd.DataFrame, account_id: str, token: str) -> int:
+    before = len(df)
+    df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+    dropped = before - len(df)
+    if dropped:
+        print(f"  [{symbol}] {dropped} righe scartate (valori NaN, tipico di buchi di liquidita' "
+              f"weekend/festivi in Dukascopy) — non inserite in D1.")
+    if df.empty:
+        return 0
+
     inserted = 0
     for i in range(0, len(df), D1_INSERT_CHUNK):
         chunk = df.iloc[i:i + D1_INSERT_CHUNK]
@@ -84,7 +98,7 @@ def _insert_rows(symbol: str, df: pd.DataFrame, account_id: str, token: str) -> 
             f"('{symbol}', '{row.timestamp.isoformat()}', {row.open}, {row.high}, {row.low}, {row.close}, 0)"
             for row in chunk.itertuples()
         )
-        sql = ("INSERT INTO ohlc_prices (symbol, timestamp, open, high, low, close, volume) "
+        sql = ("INSERT OR IGNORE INTO ohlc_prices (symbol, timestamp, open, high, low, close, volume) "
                f"VALUES {values}")
         _d1_query(sql, account_id, token)
         inserted += len(chunk)
