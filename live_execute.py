@@ -2,79 +2,21 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
-AGGIORNAMENTO 19/07/2026 — PROTEZIONE ACCANTONATO (tetto equity reale +
-valvola), sostituisce il gap discusso in chat il 19/07 ("l'accantonato
-è protetto solo sulla carta, non nella realtà del conto"):
-
-  LIVELLO 1 — Tetto (continuo, ogni ciclo, sia per V6 che per MR):
-    capitale_investibile_totale = max(0, equity_reale_IG - accantonato)
-    Se capital_v6 + capital_mr tracciato in D1 supera questo tetto (per
-    drift tra il PnL calcolato internamente e l'equity reale — es. costi
-    di funding non modellati, arrotondamenti, o qualunque altra causa),
-    i due pool vengono scalati proporzionalmente per rientrarci.
-    Richiede una chiamata a ig_client.get_account_balance() ad ogni ciclo
-    — equity reale = balance + profit_loss (realizzato + floating aperto,
-    NON 'balance' da solo che ignora le posizioni aperte, NON 'available'
-    che sottrae anche il margine).
-
-  LIVELLO 2 — Valvola (scatta SOLO quando serve per la size minima):
-    budget_periodo = 20% × accantonato_corrente (VALVOLA_PCT)
-    consumato_periodo si azzera SOLO se l'accantonato del nuovo periodo
-    (mensile, stesso ciclo del consolidamento) è maggiore
-    dell'accantonato di riferimento dell'ultimo reset — altrimenti
-    persiste invariato (il budget non consumato NON si accumula né si
-    perde, resta disponibile finché non scatta un reset).
-    Preleva ESATTAMENTE l'importo che serve per raggiungere la size
-    minima negoziabile, mai più del budget residuo del periodo.
-    Se il budget non basta (parziale o esaurito): fallback al
-    comportamento attuale per quella strategia — V6 forza comunque al
-    minimo, MR salta comunque il trade.
-    L'importo prelevato dalla valvola diventa capitale vero del pool
-    (si somma a capital_v6/capital_mr) — torna esposto a guadagni/perdite
-    futuri come il resto del capitale, non è protetto una seconda volta.
-
-    x=20% scelto dopo simulazione sintetica dedicata (non sui dati
-    storici del motore — testa il meccanismo di money management in
-    isolamento, non il segnale): nello scenario "near-miss" (gap
-    tipico ~100-150EUR, il caso realistico per questo progetto — RCA
-    sez.15/24) copre il 100% dei casi senza sprecare budget; sotto il
-    15% non basta quasi mai, sopra il 20% non aggiunge beneficio (il
-    surplus resta semplicemente inutilizzato). Nello scenario di stress
-    profondo (gap ~500EUR, capitale crollato molto sotto la norma)
-    nessun x ragionevole basta — la valvola è un ponte per un piccolo
-    scarto vicino al minimo, non un salvagente per un crollo di
-    capitale; in quel caso resta il fallback attuale, invariato.
-    Non ancora validato su dati storici reali — solo simulazione
-    sintetica del meccanismo. Raffinare in Fase 2 se necessario.
+AGGIORNAMENTO 20/07/2026 — DIAGNOSTICA PARAMETRI OGNI CICLO:
+Dopo 2 giorni quasi completi senza nessun segnale (ne' V6 ne' MR),
+richiesta di visibilita' sui valori reali dei parametri che
+determinano il segnale, per verificare che sia plausibile e non un
+bug silenzioso (stesso spirito del bug OHLC insert trovato in
+sessione — mai fidarsi ciecamente di un "nessun segnale" senza poter
+vedere i numeri dietro). Aggiunte le funzioni _diag_v6() e _diag_mr(),
+chiamate ad OGNI ciclo (segnale trovato o no) — nessuna modifica alla
+logica di generate_signals()/generate_mean_reversion_signals() in
+engine.py/mean_reversion_signals.py, solo lettura e stampa dei valori
+gia' calcolati sull'ultima barra chiusa.
 
 Il resto del file (split V6/MR, kill switch floating, accantonamento
-mensile) è INVARIATO dalla versione precedente — vedi commenti storici
-sotto per il contesto.
-
-AGGIORNAMENTO 18/07/2026 — INTEGRAZIONE MEAN-REVERSION:
-Il ciclo gestisce DUE strategie indipendenti, ciascuna col proprio
-sotto-pool di capitale (split FISSO 70% V6 / 30% mean-reversion,
-deciso su 2.000€ reali — 1.400€/600€ iniziali). I due pool sono trattati
-come conti virtuali COMPLETAMENTE indipendenti: slot concorrenti (max 2)
-e ordini/giorno (max 3) separati per pool, non condivisi.
-
-AGGIORNAMENTO 18/07/2026 (2) — KILL SWITCH GIORNALIERO FLOATING:
-check_and_apply_kill_switches() calcola perdita realizzata+floating
-rispetto al capitale di inizio giornata di ciascun pool; se supera
-kill_switch_threshold_pct (default -4%), blocca SOLO nuovi ordini per
-quel pool per il resto della giornata. Le posizioni già aperte NON
-vengono mai chiuse forzatamente.
-
-DRY_RUN=True di default (variabile d'ambiente DRY_RUN, default "true")
-— nessun ordine reale finché non viene impostata esplicitamente a
-"false".
-
-Ciclo ad ogni esecuzione (pensato per girare via cron ogni 30min):
-  1. Gestisce le posizioni aperte (V6 + MR).
-  1b. Verifica kill switch giornaliero, separato per pool.
-  1c. Legge equity reale da IG, applica il tetto di Livello 1 (NUOVO).
-  2. Rileva nuovi segnali V6 (con valvola di Livello 2 se serve).
-  3. Rileva nuovi segnali mean-reversion RSI (idem).
+mensile, protezione accantonato Livello 1/2) e' INVARIATO — vedi
+commenti storici sotto per il contesto.
 """
 
 from __future__ import annotations
@@ -88,7 +30,7 @@ import dukascopy_python
 from dukascopy_python.instruments import INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100
 
 import engine as eng
-from mean_reversion_signals import generate_mean_reversion_signals
+from mean_reversion_signals import generate_mean_reversion_signals, ADX_THRESHOLD, RSI_OVERSOLD, RSI_OVERBOUGHT
 from ig_client import IGSession, load_credentials_from_env
 
 WARMUP_DAYS = 90
@@ -128,16 +70,53 @@ def fetch_historical(symbol_const, start: datetime, end: datetime) -> pd.DataFra
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-CONSOLIDATE_PCT = 0.4      # opzione 3 mensile, validata su 5 periodi ufficiali il 16-17/07/2026
-THRESHOLD_MULT = 1.5
+# =====================================================================
+# DIAGNOSTICA (nuovo 20/07/2026) — sola lettura, nessun impatto sul segnale
+# =====================================================================
+
+def _diag_v6(name: str, row: pd.Series) -> str:
+    """Stampa i valori reali dei 4 sub-criteri V6 sull'ultima barra
+    chiusa, indipendentemente dal fatto che il segnale scatti o meno.
+    Legge SOLO colonne gia' calcolate da eng.generate_signals() —
+    nessun ricalcolo, nessuna logica duplicata."""
+    close = row["close"]
+    ema_f, ema_s = row["ema_fast"], row["ema_slow"]
+    adx = row["adx"]
+    rh, rl = row["rolling_high"], row["rolling_low"]
+    ebf, ebs = row["ema_broad_fast"], row["ema_broad_slow"]
+
+    direction = "long" if ema_f > ema_s else ("short" if ema_f < ema_s else "flat")
+    adx_ok = adx > eng.PARAMS.adx_min_context
+    dist_breakout_long = close - rh if pd.notna(rh) else float("nan")
+    dist_breakout_short = rl - close if pd.notna(rl) else float("nan")
+    broad = "long_ok" if ebf > ebs else ("short_ok" if ebf < ebs else "flat")
+
+    return (
+        f"  [V6/{name}] diag: close={close:.1f} | ema20={ema_f:.1f} ema50={ema_s:.1f} "
+        f"-> direzione={direction} | adx={adx:.1f} (soglia>{eng.PARAMS.adx_min_context:.0f}: "
+        f"{'OK' if adx_ok else 'NO'}) | breakout: high{eng.INSTRUMENTS[name].breakout_lookback}="
+        f"{rh:.1f} low{eng.INSTRUMENTS[name].breakout_lookback}={rl:.1f} "
+        f"(dist da long={dist_breakout_long:+.1f}pt, dist da short={dist_breakout_short:+.1f}pt, "
+        f"serve >0 per scattare) | trend ampio: ema100={ebf:.1f} ema200={ebs:.1f} -> {broad}"
+    )
+
+
+def _diag_mr(name: str, row: pd.Series, mode: str) -> str:
+    """Analogo a _diag_v6 ma per il ramo mean-reversion. Legge SOLO
+    colonne gia' calcolate da generate_mean_reversion_signals()."""
+    adx = row["adx"]
+    regime_ok = adx < ADX_THRESHOLD
+    base = (f"  [MR/{name}] diag: adx={adx:.1f} (regime<{ADX_THRESHOLD:.0f}: "
+            f"{'OK' if regime_ok else 'NO, V6 ha priorita in questo regime'})")
+    if mode == "rsi" and "rsi" in row.index:
+        rsi = row["rsi"]
+        base += (f" | rsi={rsi:.1f} (long se <{RSI_OVERSOLD:.0f}, "
+                  f"short se >{RSI_OVERBOUGHT:.0f})")
+    return base
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
-    """Accantonamento su capitale COMBINATO (v6+mr). Aggiornata 19/07/2026
-    per gestire anche il reset della valvola (Livello 2): il budget si
-    rinnova SOLO se l'accantonato di questo mese supera quello di
-    riferimento dell'ultimo reset, altrimenti budget/consumato restano
-    invariati (persistono, non si azzerano né si accumulano)."""
+    """Accantonamento su capitale COMBINATO (v6+mr). INVARIATO dal 19/07/2026."""
     capital_v6 = prev_state.get("capital_current_v6")
     capital_mr = prev_state.get("capital_current_mr")
     if capital_v6 is None or capital_mr is None:
@@ -184,7 +163,6 @@ def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> d
                   f"({prev_month} -> {this_month}). Investito totale: {combined:.2f} "
                   f"(V6={capital_v6:.2f} MR={capital_mr:.2f})  Accantonato: {accantonato:.2f}")
 
-        # --- reset valvola SOLO se l'accantonato e' cresciuto rispetto al riferimento ---
         if accantonato > valvola_accantonato_rif:
             vecchio_riferimento = valvola_accantonato_rif
             valvola_budget = VALVOLA_PCT * accantonato
@@ -203,6 +181,10 @@ def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> d
         "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
         "valvola_accantonato_riferimento": valvola_accantonato_rif,
     }
+
+
+CONSOLIDATE_PCT = 0.4      # opzione 3 mensile, validata su 5 periodi ufficiali il 16-17/07/2026
+THRESHOLD_MULT = 1.5
 
 
 def get_or_create_today_state(today_str: str) -> dict:
@@ -263,12 +245,7 @@ def get_today_state(today_str: str) -> dict:
 
 
 def apply_equity_cap(session: IGSession, today_str: str) -> dict:
-    """LIVELLO 1 (nuovo 19/07/2026): legge l'equity reale da IG e applica
-    il tetto capitale_investibile_totale = max(0, equity - accantonato).
-    Se capital_v6+capital_mr tracciato in D1 supera il tetto, scala
-    entrambi i pool proporzionalmente per rientrarci e persiste la
-    correzione. Ritorna lo stato del giorno aggiornato (dopo eventuale
-    scaling) insieme a equity/capitale_investibile per logging."""
+    """LIVELLO 1. INVARIATO dal 19/07/2026."""
     day_state = get_today_state(today_str)
     try:
         bal = session.get_account_balance()
@@ -285,7 +262,7 @@ def apply_equity_cap(session: IGSession, today_str: str) -> dict:
     capital_mr = day_state.get("capital_current_mr") or 0.0
     combined = capital_v6 + capital_mr
 
-    if combined > capitale_investibile_totale + 0.01:  # tolleranza arrotondamento
+    if combined > capitale_investibile_totale + 0.01:
         fraction = capitale_investibile_totale / combined if combined > 0 else 0.0
         new_v6 = capital_v6 * fraction
         new_mr = capital_mr * fraction
@@ -315,14 +292,10 @@ def apply_equity_cap(session: IGSession, today_str: str) -> dict:
 
 def try_valvola(today_str: str, day_state: dict, risk_amount_needed_for_min: float,
                  pool_capital: float, risk_pct: float) -> tuple[float, bool]:
-    """LIVELLO 2 (nuovo 19/07/2026): se il capitale del pool non basta a
-    raggiungere la size minima, preleva dal budget residuo della valvola
-    ESATTAMENTE quanto serve (mai di più). Ritorna (nuovo_capitale_pool,
-    budget_ancora_insufficiente). Aggiorna valvola_consumato in D1 se
-    avviene un prelievo."""
+    """LIVELLO 2. INVARIATO dal 19/07/2026."""
     extra_capital_needed = risk_amount_needed_for_min / risk_pct - pool_capital
     if extra_capital_needed <= 0:
-        return pool_capital, False  # non serve la valvola
+        return pool_capital, False
 
     budget = day_state.get("valvola_budget", 0.0) or 0.0
     consumato = day_state.get("valvola_consumato", 0.0) or 0.0
@@ -515,6 +488,10 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
         if closed.empty:
             continue
         last_closed = closed.iloc[-1]
+
+        # --- DIAGNOSTICA (nuovo 20/07/2026): sempre stampata, segnale o no ---
+        print(_diag_v6(name, last_closed))
+
         sig = last_closed["signal"]
         if sig not in ("long", "short"):
             print(f"  [V6/{name}] nessun segnale.")
@@ -548,7 +525,6 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
             risk_amount = capital * inst.risk_pct
             size = risk_amount / (stop_distance_pts * inst.point_value)
             if ancora_insufficiente or size < inst.min_tradable_size:
-                # fallback INVARIATO: forza comunque al minimo
                 size = inst.min_tradable_size
                 forced_min = True
 
@@ -617,6 +593,10 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
         if closed.empty:
             continue
         last_closed = closed.iloc[-1]
+
+        # --- DIAGNOSTICA (nuovo 20/07/2026): sempre stampata, segnale o no ---
+        print(_diag_mr(name, last_closed, MR_MODE))
+
         sig = last_closed["signal"]
         if sig not in ("long", "short"):
             print(f"  [MR/{name}] nessun segnale.")
