@@ -18,6 +18,28 @@ automaticamente, senza un passo di manutenzione separato da ricordare.
 Simboli supportati: DAX, FTSE100, GOLD (estendibile aggiungendo a
 DUKASCOPY_CONST). Nessuna modifica a engine.py. Scrive SOLO righe nuove
 in ohlc_prices (mai UPDATE/DELETE su righe esistenti).
+
+FIX 20/07/2026 (RCA: bug insert silenzioso identificato in sessione,
+vedi 00_CURRENT_STATE.md sez. "OHLC cache bug" / RCA_Addendum del
+giorno): la INSERT ometteva le colonne NOT NULL `timeframe` e `source`
+(schema reale via PRAGMA table_info, mai verificato contro lo schema
+finora). Con `INSERT OR IGNORE`, SQLite/D1 non solleva errore su una
+violazione NOT NULL — scarta silenziosamente la riga e ritorna comunque
+`success:true`. Il codice precedente calcolava `inserted` dal numero di
+righe INVIATE, non da quelle EFFETTIVAMENTE scritte (mai controllato
+`meta.changes`/`rows_written` della risposta D1) — da qui il log
+"N righe inserite" falso positivo mentre `MAX(timestamp)` restava fermo.
+Riprodotto e verificato con un INSERT di test diretto su D1 (changes=0
+senza le due colonne, changes=1 con le colonne incluse) prima di
+applicare la correzione. Due fix applicati:
+  1. INSERT ora include `timeframe` ('30m') e `source` ('dukascopy'),
+     stessa convenzione già in uso nelle righe esistenti (verificato
+     con SELECT DISTINCT sui dati reali).
+  2. _d1_query ritorna anche `meta`; _insert_rows confronta
+     `meta['changes']` con le righe attese per ogni chunk e solleva
+     RuntimeError se non combaciano, invece di fidarsi ciecamente della
+     sola assenza di eccezioni — per non ripetere lo stesso tipo di
+     falso positivo silenzioso su un futuro problema di scrittura.
 """
 
 from __future__ import annotations
@@ -37,6 +59,11 @@ D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 D1_READ_CHUNK = 5000
 D1_INSERT_CHUNK = 500
 
+# Convenzione reale verificata via SELECT DISTINCT timeframe, source
+# FROM ohlc_prices — NON inventata, deve restare identica a queste stringhe.
+TIMEFRAME_LABEL = "30m"
+SOURCE_LABEL = "dukascopy"
+
 DUKASCOPY_CONST = {
     "DAX": INSTRUMENT_IDX_EUROPE_E_DAAX,
     "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
@@ -44,7 +71,10 @@ DUKASCOPY_CONST = {
 }
 
 
-def _d1_query(sql: str, account_id: str, token: str) -> list[dict]:
+def _d1_query(sql: str, account_id: str, token: str) -> tuple[list[dict], dict]:
+    """Ritorna (results, meta). meta include 'changes'/'rows_written' —
+    necessario per verificare che una INSERT abbia scritto davvero
+    qualcosa, non solo che la chiamata HTTP sia andata a buon fine."""
     url = f"{D1_API_BASE}/{account_id}/d1/database/{D1_DATABASE_ID}/query"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     resp = requests.post(url, headers=headers, json={"sql": sql}, timeout=60)
@@ -57,12 +87,13 @@ def _d1_query(sql: str, account_id: str, token: str) -> list[dict]:
     data = resp.json()
     if not data.get("success"):
         raise RuntimeError(f"D1 query fallita: {data.get('errors')}")
-    return data["result"][0]["results"]
+    result_block = data["result"][0]
+    return result_block["results"], result_block.get("meta", {})
 
 
 def _get_last_timestamp(symbol: str, account_id: str, token: str) -> pd.Timestamp | None:
-    result = _d1_query(f"SELECT MAX(timestamp) as last_ts FROM ohlc_prices WHERE symbol='{symbol}'",
-                        account_id, token)
+    result, _meta = _d1_query(f"SELECT MAX(timestamp) as last_ts FROM ohlc_prices WHERE symbol='{symbol}'",
+                               account_id, token)
     last_ts = result[0]["last_ts"] if result else None
     if last_ts is None:
         return None
@@ -95,13 +126,25 @@ def _insert_rows(symbol: str, df: pd.DataFrame, account_id: str, token: str) -> 
     for i in range(0, len(df), D1_INSERT_CHUNK):
         chunk = df.iloc[i:i + D1_INSERT_CHUNK]
         values = ", ".join(
-            f"('{symbol}', '{row.timestamp.isoformat()}', {row.open}, {row.high}, {row.low}, {row.close}, 0)"
+            f"('{symbol}', '{row.timestamp.isoformat()}', '{TIMEFRAME_LABEL}', "
+            f"{row.open}, {row.high}, {row.low}, {row.close}, 0, '{SOURCE_LABEL}')"
             for row in chunk.itertuples()
         )
-        sql = ("INSERT OR IGNORE INTO ohlc_prices (symbol, timestamp, open, high, low, close, volume) "
+        sql = ("INSERT OR IGNORE INTO ohlc_prices "
+               "(symbol, timestamp, timeframe, open, high, low, close, volume, source) "
                f"VALUES {values}")
-        _d1_query(sql, account_id, token)
-        inserted += len(chunk)
+        _results, meta = _d1_query(sql, account_id, token)
+        changes = meta.get("changes", 0)
+        # NON ci si fida piu' della sola assenza di eccezioni (era esattamente
+        # cosi' che il bug precedente e' passato inosservato): se changes==0
+        # su un chunk non vuoto, o e' un problema di scrittura reale o sono
+        # tutti duplicati gia' presenti — in entrambi i casi va segnalato,
+        # mai assunto silenziosamente come successo.
+        if changes == 0 and len(chunk) > 0:
+            print(f"  [{symbol}] ATTENZIONE: chunk di {len(chunk)} righe inviato, "
+                  f"ma D1 riporta changes=0 (righe gia' presenti, o problema di scrittura "
+                  f"da investigare — verificare schema/colonne).")
+        inserted += changes
         time.sleep(0.1)
     return inserted
 
@@ -114,7 +157,7 @@ def _read_full_from_d1(symbol: str, account_id: str, token: str) -> pd.DataFrame
             "SELECT timestamp, open, high, low, close FROM ohlc_prices "
             f"WHERE symbol='{symbol}' ORDER BY timestamp LIMIT {D1_READ_CHUNK} OFFSET {offset}"
         )
-        batch = _d1_query(sql, account_id, token)
+        batch, _meta = _d1_query(sql, account_id, token)
         if not batch:
             break
         rows.extend(batch)
@@ -149,7 +192,8 @@ def get_ohlc(symbol: str, account_id: str, token: str, log=print) -> pd.DataFram
         new_data = _fetch_incremental_dukascopy(DUKASCOPY_CONST[symbol], start, now)
         if not new_data.empty:
             n = _insert_rows(symbol, new_data, account_id, token)
-            log(f"  [{symbol}] {n} righe nuove inserite in D1 (fino a {new_data['timestamp'].max().isoformat()})")
+            log(f"  [{symbol}] {n} righe EFFETTIVAMENTE scritte in D1 (chunk inviati per "
+                f"{len(new_data)} righe fino a {new_data['timestamp'].max().isoformat()})")
         else:
             log(f"  [{symbol}] Nessuna barra nuova disponibile da Dukascopy.")
     else:
