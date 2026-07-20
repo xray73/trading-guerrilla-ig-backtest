@@ -1,0 +1,43 @@
+name: Calibrate MR ADX Band
+
+# Verifica se restringere il mean-reversion alla banda ADX [15-20)
+# (scoperta il 19/07/2026 dal pooling dei 5 periodi) migliora il
+# risultato rispetto al comportamento attuale (ADX<20 tutto) —
+# verificato periodo per periodo, non solo in aggregato, dato che la
+# soglia e' stata scoperta guardando tutti i periodi insieme. Nessuna
+# scrittura su D1 oltre l'aggiornamento incrementale di ohlc_prices,
+# nessuna modifica a engine.py/engine_mean_reversion.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  calibrate-mr-adx-band:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Verifica banda ADX mean-reversion
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python calibrate_mr_adx_band.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibrate-mr-adx-band-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
