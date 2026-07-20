@@ -1,0 +1,32 @@
+name: Count Signals Jun-Jul 2026
+
+# Conta quanti segnali V6 e MR sono stati generati su DAX/FTSE100 nel
+# periodo 2026-06-01 - 2026-07-20, per verificare se i giorni recenti
+# senza segnale sono coerenti con un periodo più ampio. Nessuna
+# scrittura su live_positions/live_trades/live_daily_state. Output
+# solo aggregato + lista eventi (attesa piccola).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  count-signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Conta segnali giugno-luglio 2026
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python count_signals_jun_jul_2026.py
