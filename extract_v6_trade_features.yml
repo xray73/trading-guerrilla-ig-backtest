@@ -1,0 +1,33 @@
+name: Extract V6 Trade Features
+
+# Estrae feature ricche (formazione segnale + sviluppo trend) per ogni
+# trade V6 sui 5 periodi ufficiali, e le scrive in due tabelle D1
+# dedicate (research_v6_trade_features, research_v6_trade_path) create
+# automaticamente se mancanti. Nessuna scrittura sulle tabelle ufficiali
+# trades/backtest_runs/live_*. Nessuna modifica a engine.py o alle
+# sottoclassi — solo lettura ed estrazione.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extract-features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Estrai feature trade V6
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python extract_v6_trade_features.py
