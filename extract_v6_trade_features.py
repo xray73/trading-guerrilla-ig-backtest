@@ -130,6 +130,55 @@ def ensure_tables(account_id: str, token: str):
     print("Tabelle research_v6_trade_features / research_v6_trade_path pronte (create se mancanti).")
 
 
+def fmt_val(v):
+    """Converte un valore in stringa SQL, arrotondando i float a 6 decimali
+    per tenere le righe corte (payload piu' piccolo = meno rischio di
+    superare il limite di lunghezza query D1, vedi insert_chunked_adaptive)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "NULL"
+    if isinstance(v, str):
+        return "'" + v.replace("'", "''") + "'"
+    if isinstance(v, float):
+        return f"{v:.6f}"
+    return str(v)
+
+
+def insert_chunked_adaptive(df: pd.DataFrame, table: str, account_id: str, token: str,
+                             start_chunk: int = 300, min_chunk: int = 5) -> int:
+    """Inserisce df in `table` a blocchi, dimezzando automaticamente la
+    dimensione del blocco se D1 risponde SQLITE_TOOBIG (statement too
+    long) — invece di indovinare una dimensione fissa che potrebbe
+    rompersi di nuovo con piu' colonne o dataset futuri piu' grandi."""
+    cols = list(df.columns)
+    total_written = 0
+    i = 0
+    chunk_size = start_chunk
+    while i < len(df):
+        chunk = df.iloc[i:i + chunk_size]
+        values = ", ".join(
+            f"({', '.join(fmt_val(r[c]) for c in cols)})" for _, r in chunk.iterrows()
+        )
+        sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES {values}"
+        try:
+            _results, meta = d1_query(sql, account_id, token)
+        except RuntimeError as e:
+            if "SQLITE_TOOBIG" in str(e) or "statement too long" in str(e).lower():
+                if chunk_size <= min_chunk:
+                    raise RuntimeError(f"Chunk gia' al minimo ({min_chunk}) ma ancora troppo lungo — "
+                                        f"controllare il numero di colonne di {table}.")
+                chunk_size = max(chunk_size // 2, min_chunk)
+                print(f"  [{table}] statement troppo lungo, riduco chunk a {chunk_size} e riprovo...")
+                continue  # NON avanza i, riprova lo stesso blocco di dati con chunk piu' piccolo
+            raise
+        changes = meta.get("changes", 0)
+        if changes == 0 and len(chunk) > 0:
+            print(f"  ATTENZIONE [{table}]: chunk di {len(chunk)} righe inviato ma changes=0 — verificare.")
+        total_written += changes
+        i += len(chunk)
+        time.sleep(0.1)
+    return total_written
+
+
 def slice_period(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     return df[(df["timestamp"] >= start) & (df["timestamp"] < end)].reset_index(drop=True)
 
@@ -258,58 +307,14 @@ def main():
 
     print("\nScrivo research_v6_trade_features su D1...")
     df_feat = pd.DataFrame(feature_rows)
-    cols = list(df_feat.columns)
-    total_written = 0
-    for i in range(0, len(df_feat), INSERT_CHUNK):
-        chunk = df_feat.iloc[i:i + INSERT_CHUNK]
-        values = []
-        for _, r in chunk.iterrows():
-            vals = []
-            for c in cols:
-                v = r[c]
-                if v is None or (isinstance(v, float) and np.isnan(v)):
-                    vals.append("NULL")
-                elif isinstance(v, str):
-                    vals.append("'" + v.replace("'", "''") + "'")
-                else:
-                    vals.append(str(v))
-            values.append(f"({', '.join(vals)})")
-        sql = (f"INSERT OR REPLACE INTO research_v6_trade_features ({', '.join(cols)}) "
-               f"VALUES {', '.join(values)}")
-        _results, meta = d1_query(sql, account_id, token)
-        changes = meta.get("changes", 0)
-        if changes == 0 and len(chunk) > 0:
-            print(f"  ATTENZIONE: chunk di {len(chunk)} righe inviato ma changes=0 — verificare.")
-        total_written += changes
-        time.sleep(0.1)
+    total_written = insert_chunked_adaptive(df_feat, "research_v6_trade_features", account_id, token,
+                                             start_chunk=300)
     print(f"  {total_written} righe scritte in research_v6_trade_features.")
 
     print("\nScrivo research_v6_trade_path su D1...")
     df_path = pd.DataFrame(path_rows)
-    cols_p = list(df_path.columns)
-    total_written_p = 0
-    for i in range(0, len(df_path), INSERT_CHUNK):
-        chunk = df_path.iloc[i:i + INSERT_CHUNK]
-        values = []
-        for _, r in chunk.iterrows():
-            vals = []
-            for c in cols_p:
-                v = r[c]
-                if v is None or (isinstance(v, float) and np.isnan(v)):
-                    vals.append("NULL")
-                elif isinstance(v, str):
-                    vals.append("'" + v.replace("'", "''") + "'")
-                else:
-                    vals.append(str(v))
-            values.append(f"({', '.join(vals)})")
-        sql = (f"INSERT INTO research_v6_trade_path ({', '.join(cols_p)}) "
-               f"VALUES {', '.join(values)}")
-        _results, meta = d1_query(sql, account_id, token)
-        changes = meta.get("changes", 0)
-        if changes == 0 and len(chunk) > 0:
-            print(f"  ATTENZIONE: chunk di {len(chunk)} righe inviato ma changes=0 — verificare.")
-        total_written_p += changes
-        time.sleep(0.1)
+    total_written_p = insert_chunked_adaptive(df_path, "research_v6_trade_path", account_id, token,
+                                               start_chunk=300)
     print(f"  {total_written_p} righe scritte in research_v6_trade_path.")
 
     print(f"\n=== Completato. Dataset pronto per query future (nessun rilancio backtest necessario). ===")
