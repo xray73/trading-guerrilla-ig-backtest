@@ -1,0 +1,42 @@
+name: Analyze ADX Bucket Quality
+
+# Scompone i trade MR e V6 dei 5 periodi ufficiali per fascia ADX
+# (pooled DAX+FTSE100), per verificare se una banda morta 10-20 tra
+# V6 e MR avrebbe senso e come si distribuisce la qualita' dei trade
+# V6 per forza del trend. Legge OHLC da D1 (ohlc_data_source.py,
+# aggiorna solo le barre mancanti). Nessuna modifica a engine.py o
+# alle sottoclassi esistenti.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  analyze-adx-bucket-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Scomposizione ADX bucket
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python analyze_adx_bucket_quality.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyze-adx-bucket-quality-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
