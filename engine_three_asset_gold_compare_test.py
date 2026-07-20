@@ -25,27 +25,17 @@ sottoclassi esistenti.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-
-import dukascopy_python
-from dukascopy_python.instruments import (
-    INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
-    INSTRUMENT_FX_METALS_XAU_USD,
-)
 
 import engine as eng
 from engine_floating_kill_switch import BacktestEngineFloatingKillSwitch
 from engine_three_asset_gold import BacktestEngineV6Gold, instruments_with_gold
 from engine_three_asset_gold_adxfloor import BacktestEngineV6GoldADXFloor
+from ohlc_data_source import get_ohlc
 
 CAPITAL_V6 = 1400.0
-SYMBOLS_3 = {
-    "DAX": INSTRUMENT_IDX_EUROPE_E_DAAX,
-    "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
-    "GOLD": INSTRUMENT_FX_METALS_XAU_USD,
-}
+SYMBOLS_3 = ["DAX", "FTSE100", "GOLD"]
 
 PERIODS = [
     ("2015-2016", "2015-01-05", "2016-12-29"),
@@ -54,20 +44,6 @@ PERIODS = [
     ("2024-2025", "2024-01-03", "2025-12-31"),
     ("2026-ytd", "2026-01-05", "2026-07-10"),
 ]
-
-FULL_FETCH_START = datetime(2014, 10, 1, tzinfo=timezone.utc)
-FULL_FETCH_END = datetime(2026, 7, 11, tzinfo=timezone.utc)
-
-
-def fetch_bars_full(symbol_const) -> pd.DataFrame:
-    df = dukascopy_python.fetch(
-        symbol_const, dukascopy_python.INTERVAL_MIN_30, dukascopy_python.OFFER_SIDE_BID,
-        FULL_FETCH_START, FULL_FETCH_END,
-    ).reset_index()
-    ts_col = df.columns[0]
-    df = df.rename(columns={ts_col: "timestamp"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 def slice_period(df: pd.DataFrame, p_start: pd.Timestamp, p_end: pd.Timestamp) -> pd.DataFrame:
@@ -99,11 +75,19 @@ def main():
 
     log("=== Confronto a 3 vie: baseline / +GOLD correlazione pura / +GOLD correlazione+pavimento ADX ===\n")
 
+    token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account_id:
+        log("ERRORE: CLOUDFLARE_API_TOKEN o CLOUDFLARE_ACCOUNT_ID mancanti.")
+        return
+
     instruments_2 = dict(eng.INSTRUMENTS)
     instruments_3 = instruments_with_gold()
 
-    log("Scarico storico DAX/FTSE100/GOLD (fetch unico per strumento)...")
-    raw_full = {name: fetch_bars_full(const) for name, const in SYMBOLS_3.items()}
+    log("Verifico/aggiorno OHLC (D1 + eventuali barre mancanti da Dukascopy)...")
+    raw_full = {name: get_ohlc(name, account_id, token, log=log) for name in SYMBOLS_3}
+    for name, df in raw_full.items():
+        log(f"  {name}: {len(df)} righe, fino a {df['timestamp'].max()}")
     log("Fatto.\n")
 
     v6_signals_full = {name: eng.generate_signals(raw_full[name], instruments_3[name]) for name in SYMBOLS_3}
