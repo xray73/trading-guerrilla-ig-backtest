@@ -1,0 +1,43 @@
+name: Calibrate V6 ADX Floor
+
+# Verifica se alzare la soglia minima ADX per V6 (25 o 30 invece di
+# 20) migliora il risultato, periodo per periodo — dopo che il bucket
+# analysis (19/07/2026) ha mostrato la fascia 20-25 come la piu'
+# debole. Aspettativa dichiarata: probabilmente negativo/piatto,
+# coerente col test gemello su MR (fallito per path-dependency).
+# Nessuna scrittura su D1 oltre l'aggiornamento incrementale di
+# ohlc_prices, nessuna modifica a engine.py/engine_floating_kill_switch.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  calibrate-v6-adx-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Verifica soglia ADX V6
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python calibrate_v6_adx_floor.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibrate-v6-adx-floor-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
