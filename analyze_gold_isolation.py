@@ -74,8 +74,8 @@ def fetch_bars_full(symbol_const) -> pd.DataFrame:
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def slice_period(df: pd.DataFrame, p_start: pd.Timestamp) -> pd.DataFrame:
-    return df[df["timestamp"] >= p_start].reset_index(drop=True)
+def slice_period(df: pd.DataFrame, p_start: pd.Timestamp, p_end: pd.Timestamp) -> pd.DataFrame:
+    return df[(df["timestamp"] >= p_start) & (df["timestamp"] < p_end)].reset_index(drop=True)
 
 
 def simulate_shadow_trade(inst_df: pd.DataFrame, entry_idx: int, direction: str,
@@ -259,9 +259,10 @@ def main():
     rows = []
     for label, p_start_str, p_end_str in PERIODS:
         p_start = pd.Timestamp(p_start_str, tz="UTC")
+        p_end = pd.Timestamp(p_end_str, tz="UTC") + pd.Timedelta(days=1)
         log(f"Periodo {label}")
 
-        v6_sig_3 = {name: slice_period(v6_signals_full[name], p_start) for name in SYMBOLS_3}
+        v6_sig_3 = {name: slice_period(v6_signals_full[name], p_start, p_end) for name in SYMBOLS_3}
         v6_sig_2_only = {k: v for k, v in v6_sig_3.items() if k != "GOLD"}
 
         eng_base = BacktestEngineFloatingKillSwitch(capital0=CAPITAL_V6, instruments=instruments_2)
