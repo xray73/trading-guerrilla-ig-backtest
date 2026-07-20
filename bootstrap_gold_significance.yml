@@ -1,0 +1,44 @@
+name: Bootstrap Gold Significance
+
+# Bootstrap noise-check (20/07/2026) sul vantaggio aggregato +2.582,77EUR
+# di V6+GOLD (correlazione pura) sui 5 periodi ufficiali. Bootstrap a
+# blocchi di giornata, size dinamica via R-multiple, kill switch
+# riapplicato (Regole_Backtest_MonteCarlo.md sez.5) — verifica se il
+# vantaggio osservato supera chiaramente il rumore campionario atteso
+# (Protocollo Anti-Rumore, principio 4). Nessuna scrittura su D1,
+# nessuna modifica a engine.py o alle altre sottoclassi. Output SOLO
+# aggregato (nessun trade individuale, nessun path-by-path).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  bootstrap-gold-significance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Bootstrap noise-check GOLD
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python bootstrap_gold_significance.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-gold-significance-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
