@@ -25,9 +25,12 @@ jobs:
           python-version: '3.11'
 
       - name: Installa dipendenze
-        run: pip install dukascopy-python pandas numpy
+        run: pip install dukascopy-python pandas numpy requests
 
       - name: Confronto a 3 vie
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python engine_three_asset_gold_compare_test.py
 
       - name: Carica risultati come artifact
