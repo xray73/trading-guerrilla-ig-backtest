@@ -1,0 +1,38 @@
+name: Analyze Gold Isolation
+
+# Isola l'effetto di GOLD su V6: scompone il delta di PnL in slot
+# genuinamente vuoti riempiti da GOLD (nessun costo) vs competizione
+# reale con DAX/FTSE100 (simulazione di trade ombra per i candidati
+# esclusi, per capire se GOLD ha scalzato qualcosa di buono). Nessuna
+# scrittura su D1, nessuna modifica a engine.py/engine_three_asset_gold.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  analyze-gold-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy
+
+      - name: Isolamento effetto GOLD
+        run: python analyze_gold_isolation.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyze-gold-isolation-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
