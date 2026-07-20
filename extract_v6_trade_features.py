@@ -65,9 +65,18 @@ def d1_query(sql: str, account_id: str, token: str) -> tuple[list[dict], dict]:
     url = f"{D1_API_BASE}/{account_id}/d1/database/{D1_DATABASE_ID}/query"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     resp = requests.post(url, headers=headers, json={"sql": sql}, timeout=60)
-    if resp.status_code != 200:
-        print(f"[D1] Errore {resp.status_code}: {resp.text[:800]}")
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        # FIX 20/07/2026: un 400/413 qui e' quasi sempre un limite di
+        # dimensione a livello HTTP/gateway Cloudflare, DIVERSO dal
+        # SQLITE_TOOBIG che D1 restituisce con status 200+success:false.
+        # Prima veniva lasciato propagare come HTTPError "grezzo", che
+        # insert_chunked_adaptive (sotto) non intercettava perche'
+        # ascoltava solo RuntimeError — lo script crashava invece di
+        # dimezzare il chunk. Ora tutto passa da RuntimeError con il
+        # testo della risposta incluso, cosi' il retry lo vede.
+        raise RuntimeError(f"D1 HTTP {resp.status_code}: {resp.text[:500]}") from e
     data = resp.json()
     if not data.get("success"):
         raise RuntimeError(f"Query D1 fallita: {data.get('errors')}")
@@ -162,12 +171,16 @@ def insert_chunked_adaptive(df: pd.DataFrame, table: str, account_id: str, token
         try:
             _results, meta = d1_query(sql, account_id, token)
         except RuntimeError as e:
-            if "SQLITE_TOOBIG" in str(e) or "statement too long" in str(e).lower():
+            msg = str(e).lower()
+            too_big = ("sqlite_toobig" in msg or "statement too long" in msg
+                       or "d1 http 400" in msg or "d1 http 413" in msg
+                       or "too large" in msg or "payload too large" in msg)
+            if too_big:
                 if chunk_size <= min_chunk:
                     raise RuntimeError(f"Chunk gia' al minimo ({min_chunk}) ma ancora troppo lungo — "
                                         f"controllare il numero di colonne di {table}.")
                 chunk_size = max(chunk_size // 2, min_chunk)
-                print(f"  [{table}] statement troppo lungo, riduco chunk a {chunk_size} e riprovo...")
+                print(f"  [{table}] statement troppo lungo ({str(e)[:150]}), riduco chunk a {chunk_size} e riprovo...")
                 continue  # NON avanza i, riprova lo stesso blocco di dati con chunk piu' piccolo
             raise
         changes = meta.get("changes", 0)
