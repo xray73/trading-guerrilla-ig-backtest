@@ -10,6 +10,22 @@ ANALISI NEUTRA (nessun filtro proposto, nessuna classificazione
 vinc/perso applicata qui) — solo estrazione. Le domande su cosa
 distingue i trade si fanno DOPO, in query separate sul dataset.
 
+CORREZIONE 20/07/2026 (segnalata in chat): MFE/MAE ora rispettano la
+logica REALE del motore, non il close di barra. Il motore controlla
+stop PRIMA di target (ordine conservativo) e chiude esattamente al
+prezzo di uscita — non "vede" il resto della barra di uscita. Quindi:
+  - barre PRIMA dell'uscita: uso high/low reali (posizione aperta,
+    vive tutto il range intrabar)
+  - barra di uscita: uso SOLO l'r_multiple reale gia' calcolato dal
+    motore (coerente con quanto realmente realizzato), MAI l'high/low
+    di quella barra — evita MFE fantasma tipo il 2.19R visto in chat
+    su un trade chiuso a 1.99R.
+research_v6_trade_path ora include ANCHE open/high/low grezzi (oltre
+al close gia' presente) — dato di mercato indipendente dalla logica
+del motore, utile per altre analisi future che non riguardino MFE/MAE.
+Tabelle ricreate da zero (DROP+CREATE) per questo cambio di schema —
+dataset di ricerca, non le tabelle ufficiali.
+
 Tabelle create (IF NOT EXISTS):
 
 research_v6_trade_features (1 riga per trade):
@@ -85,8 +101,15 @@ def d1_query(sql: str, account_id: str, token: str) -> tuple[list[dict], dict]:
 
 
 def ensure_tables(account_id: str, token: str):
+    # DROP+CREATE: cambio di schema (nuove colonne open/high/low) e
+    # correzione della logica MFE/MAE — i valori vecchi non sono piu'
+    # corretti, meglio ripartire puliti che lasciare dati misti.
+    # Sicuro: tabelle di ricerca dedicate, mai trades/backtest_runs/live_*.
+    d1_query("DROP TABLE IF EXISTS research_v6_trade_features", account_id, token)
+    d1_query("DROP TABLE IF EXISTS research_v6_trade_path", account_id, token)
+
     d1_query("""
-        CREATE TABLE IF NOT EXISTS research_v6_trade_features (
+        CREATE TABLE research_v6_trade_features (
           trade_key TEXT PRIMARY KEY,
           periodo TEXT NOT NULL,
           instrument TEXT NOT NULL,
@@ -125,10 +148,13 @@ def ensure_tables(account_id: str, token: str):
     """, account_id, token)
 
     d1_query("""
-        CREATE TABLE IF NOT EXISTS research_v6_trade_path (
+        CREATE TABLE research_v6_trade_path (
           trade_key TEXT NOT NULL,
           bar_offset INTEGER NOT NULL,
           timestamp TEXT NOT NULL,
+          open REAL,
+          high REAL,
+          low REAL,
           close REAL,
           price_r REAL,
           adx REAL,
@@ -136,7 +162,7 @@ def ensure_tables(account_id: str, token: str):
           ema_slow REAL
         )
     """, account_id, token)
-    print("Tabelle research_v6_trade_features / research_v6_trade_path pronte (create se mancanti).")
+    print("Tabelle research_v6_trade_features / research_v6_trade_path ricreate con nuovo schema.")
 
 
 def fmt_val(v):
@@ -266,15 +292,45 @@ def main():
                 continue
 
             stop_distance = t["atr_at_entry"] * eng.INSTRUMENTS[inst].atr_multiplier
+
+            # price_r "grezzo" basato sul close (per grafici generali del percorso,
+            # NON usato per MFE/MAE — vedi correzione sotto)
             if direction == "long":
-                price_r = (path["close"] - t["entry_price"]) / stop_distance
+                price_r_close = (path["close"] - t["entry_price"]) / stop_distance
             else:
-                price_r = (t["entry_price"] - path["close"]) / stop_distance
+                price_r_close = (t["entry_price"] - path["close"]) / stop_distance
 
             trade_key = f"{inst}_{t['entry_time'].isoformat()}"
 
-            mfe_bar_offset = int(price_r.idxmax())
-            mae_bar_offset = int(price_r.idxmin())
+            # --- CORREZIONE: MFE/MAE che rispettano cosa fa DAVVERO il motore ---
+            # Barre PRIMA dell'uscita: posizione aperta, vive tutto il range
+            # intrabar -> uso high/low reali (aggiustati per direzione).
+            # Barra di uscita: il motore chiude ESATTAMENTE al prezzo di
+            # uscita (stop controllato PRIMA di target, ordine conservativo)
+            # -> uso SOLO l'r_multiple realmente realizzato, mai l'high/low
+            # di quella barra (eviterebbe MFE fantasma oltre il target reale).
+            n_bars = len(path)
+            favorable_candidates = []
+            adverse_candidates = []
+            for i in range(n_bars):
+                if i == n_bars - 1:
+                    # barra di uscita: unico punto valido = esito reale
+                    r_val = float(t["r_multiple"])
+                    favorable_candidates.append(r_val)
+                    adverse_candidates.append(r_val)
+                else:
+                    bar = path.iloc[i]
+                    if direction == "long":
+                        favorable_candidates.append((bar["high"] - t["entry_price"]) / stop_distance)
+                        adverse_candidates.append((bar["low"] - t["entry_price"]) / stop_distance)
+                    else:
+                        favorable_candidates.append((t["entry_price"] - bar["low"]) / stop_distance)
+                        adverse_candidates.append((t["entry_price"] - bar["high"]) / stop_distance)
+
+            mfe_r = max(favorable_candidates)
+            mfe_bar_offset = int(np.argmax(favorable_candidates))
+            mae_r = min(adverse_candidates)
+            mae_bar_offset = int(np.argmin(adverse_candidates))
 
             bar_offsets = np.arange(len(path))
             adx_values = path["adx"].values
@@ -298,8 +354,8 @@ def main():
                 "adx_at_exit": float(path["adx"].iloc[-1]) if pd.notna(path["adx"].iloc[-1]) else None,
                 "adx_max": float(np.nanmax(adx_values)), "adx_max_bar_offset": int(np.nanargmax(adx_values)),
                 "adx_min": float(np.nanmin(adx_values)), "adx_slope_per_bar": adx_slope,
-                "mfe_r": float(price_r.max()), "mfe_bar_offset": mfe_bar_offset,
-                "mae_r": float(price_r.min()), "mae_bar_offset": mae_bar_offset,
+                "mfe_r": float(mfe_r), "mfe_bar_offset": mfe_bar_offset,
+                "mae_r": float(mae_r), "mae_bar_offset": mae_bar_offset,
                 "extraction_run_at": extraction_ts,
             })
 
@@ -307,7 +363,10 @@ def main():
                 path_rows.append({
                     "trade_key": trade_key, "bar_offset": i,
                     "timestamp": path["timestamp"].iloc[i].isoformat(),
-                    "close": float(path["close"].iloc[i]), "price_r": float(price_r.iloc[i]),
+                    "open": float(path["open"].iloc[i]) if pd.notna(path["open"].iloc[i]) else None,
+                    "high": float(path["high"].iloc[i]) if pd.notna(path["high"].iloc[i]) else None,
+                    "low": float(path["low"].iloc[i]) if pd.notna(path["low"].iloc[i]) else None,
+                    "close": float(path["close"].iloc[i]), "price_r": float(price_r_close.iloc[i]),
                     "adx": float(path["adx"].iloc[i]) if pd.notna(path["adx"].iloc[i]) else None,
                     "ema_fast": float(path["ema_fast"].iloc[i]) if pd.notna(path["ema_fast"].iloc[i]) else None,
                     "ema_slow": float(path["ema_slow"].iloc[i]) if pd.notna(path["ema_slow"].iloc[i]) else None,
