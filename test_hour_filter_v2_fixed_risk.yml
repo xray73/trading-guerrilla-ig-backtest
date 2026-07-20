@@ -1,0 +1,43 @@
+name: Test 1 v2 - Hour Filter (Fixed-Risk Bootstrap)
+
+# Ripetizione del Test 1 (filtro orario 19-22 UTC) con bootstrap a
+# RISCHIO FISSO invece che a compounding — correzione di metodo
+# (21/07/2026): il compounding durante il resampling introduceva
+# rumore spurio legato all'ordine dei giorni, non al contenuto dei
+# trade. Verificato su dati sintetici (10 seed, due scale): riduzione
+# del rumore di un fattore 2-3x. Nessuna modifica a engine.py/
+# sottoclassi esistenti.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test-hour-filter-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Test filtro orario con bootstrap corretto
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python test_hour_filter_v2_fixed_risk.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-hour-filter-v2-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
