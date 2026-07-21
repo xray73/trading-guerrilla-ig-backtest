@@ -12,6 +12,10 @@ name: Live Execute Cron (ogni 30min, orario di mercato, dry_run)
 # NOTA: questo file sostituisce live_signal_cron.yml come cron attivo.
 # Se avevi già caricato live_signal_cron.yml, disattivalo o eliminalo
 # per evitare due cron sovrapposti che scrivono sullo stesso stato D1.
+#
+# AGGIORNAMENTO 21/07/2026: aggiunta dipendenza yfinance — richiesta
+# da live_execute.py per il tracking candidati (VIX/VIX3M in
+# record_candidate_v6/mr). Mancava, causava ModuleNotFoundError.
 
 on:
   workflow_dispatch: {}   # attivato ora dal cron esterno (cron-job.org, ogni 30min)
@@ -35,7 +39,7 @@ jobs:
           python-version: '3.11'
 
       - name: Installa dipendenze
-        run: pip install dukascopy-python pandas numpy requests
+        run: pip install dukascopy-python pandas numpy requests yfinance
 
       - name: Esegui live_execute (dry_run fisso)
         env:
