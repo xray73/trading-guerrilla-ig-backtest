@@ -2,6 +2,19 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
+AGGIORNAMENTO 21/07/2026 — LOG BAR-PER-BAR POSIZIONI APERTE:
+Aggiunto `live_position_bars` (aggiornata OGNI ciclo mentre una
+posizione resta aperta) + `live_closed_position_bars` (archivio
+permanente, popolato e la riga viva cancellata alla chiusura — evita
+bloat del D1 free tier come da specifica concordata in chat 21/07/2026).
+Tabelle create manualmente su D1 (IF NOT EXISTS, non da questo script).
+Nessuna modifica alla logica di trading esistente (segnali, sizing,
+kill switch, accantonamento) — solo aggiunta di due funzioni di
+logging e il loro punto di chiamata dentro manage_open_positions().
+Riordinato lo scarico storico (hist_cache) PRIMA della gestione
+posizioni aperte (era dopo) perché il logging bar-per-bar ha bisogno
+degli indicatori calcolati sull'ultima barra chiusa.
+
 AGGIORNAMENTO 20/07/2026 — DIAGNOSTICA PARAMETRI OGNI CICLO:
 Dopo 2 giorni quasi completi senza nessun segnale (ne' V6 ne' MR),
 richiesta di visibilita' sui valori reali dei parametri che
@@ -71,7 +84,7 @@ def fetch_historical(symbol_const, start: datetime, end: datetime) -> pd.DataFra
 
 
 # =====================================================================
-# DIAGNOSTICA (nuovo 20/07/2026) — sola lettura, nessun impatto sul segnale
+# DIAGNOSTICA (20/07/2026) — sola lettura, nessun impatto sul segnale
 # =====================================================================
 
 def _diag_v6(name: str, row: pd.Series) -> str:
@@ -113,6 +126,106 @@ def _diag_mr(name: str, row: pd.Series, mode: str) -> str:
         base += (f" | rsi={rsi:.1f} (long se <{RSI_OVERSOLD:.0f}, "
                   f"short se >{RSI_OVERBOUGHT:.0f})")
     return base
+
+
+# =====================================================================
+# LOG BAR-PER-BAR POSIZIONI APERTE (nuovo 21/07/2026)
+# =====================================================================
+
+def _last_closed_indicators(name: str, strategy: str, hist_cache: dict, now: datetime):
+    """Ritorna la barra chiusa piu' recente con adx/ema/rsi gia'
+    calcolati, riusando le stesse funzioni di generate_signals()/
+    generate_mean_reversion_signals() gia' usate per i segnali —
+    nessuna logica duplicata, solo ricalcolo (economico) sullo stesso
+    hist_cache gia' scaricato una volta per ciclo."""
+    hist = hist_cache[name]
+    inst = eng.INSTRUMENTS[name]
+    if strategy == "v6":
+        signals = eng.generate_signals(hist, inst)
+    else:
+        signals = generate_mean_reversion_signals(hist, inst, mode=MR_MODE)
+    closed = signals[signals["timestamp"] + timedelta(minutes=30) <= now]
+    if closed.empty:
+        return None
+    return closed.iloc[-1]
+
+
+def log_position_bar(pos: dict, hist_cache: dict, current_price: float, now: datetime):
+    """Aggiunge/aggiorna una riga in live_position_bars per la barra
+    corrente di questa posizione. INSERT OR REPLACE su (position_id,
+    bar_offset) — sicuro anche se il cron gira piu' volte sulla stessa
+    barra da 30min (nessuna riga duplicata, l'ultima vince)."""
+    entry_time = pd.Timestamp(pos["entry_time"]).to_pydatetime()
+    bar_offset = max(0, int((now - entry_time).total_seconds() // (30 * 60)))
+
+    row = _last_closed_indicators(pos["instrument"], pos["strategy"], hist_cache, now)
+    if row is None:
+        print(f"    [log-bar/{pos['instrument']}/{pos['strategy']}] nessuna barra chiusa disponibile, salto il log di questo ciclo.")
+        return
+
+    atr_at_entry = pos.get("atr_at_entry")
+    inst = eng.INSTRUMENTS[pos["instrument"]]
+    stop_distance = atr_at_entry * inst.atr_multiplier if atr_at_entry else None
+    if stop_distance and stop_distance > 0:
+        price_r = ((current_price - pos["entry_price"]) / stop_distance if pos["direction"] == "long"
+                   else (pos["entry_price"] - current_price) / stop_distance)
+    else:
+        price_r = None
+
+    ema_fast = float(row["ema_fast"]) if "ema_fast" in row.index and pd.notna(row["ema_fast"]) else None
+    ema_slow = float(row["ema_slow"]) if "ema_slow" in row.index and pd.notna(row["ema_slow"]) else None
+    rsi = float(row["rsi"]) if "rsi" in row.index and pd.notna(row["rsi"]) else None
+    adx = float(row["adx"]) if pd.notna(row["adx"]) else None
+
+    def fv(v):
+        return "NULL" if v is None else str(v)
+
+    d1_query(
+        "INSERT OR REPLACE INTO live_position_bars "
+        "(position_id, instrument, strategy, bar_offset, timestamp, open, high, low, close, "
+        "current_price, price_r, adx, ema_fast, ema_slow, rsi, updated_at) VALUES ("
+        f"{pos['id']}, '{pos['instrument']}', '{pos['strategy']}', {bar_offset}, "
+        f"'{row['timestamp'].isoformat()}', {fv(float(row['open']) if pd.notna(row['open']) else None)}, "
+        f"{fv(float(row['high']) if pd.notna(row['high']) else None)}, "
+        f"{fv(float(row['low']) if pd.notna(row['low']) else None)}, "
+        f"{fv(float(row['close']) if pd.notna(row['close']) else None)}, "
+        f"{fv(current_price)}, {fv(price_r)}, {fv(adx)}, {fv(ema_fast)}, {fv(ema_slow)}, {fv(rsi)}, "
+        f"'{now.isoformat()}')"
+    )
+    price_r_str = f"{price_r:+.2f}" if price_r is not None else "n/d"
+    print(f"    [log-bar/{pos['instrument']}/{pos['strategy']}] bar_offset={bar_offset} price_r={price_r_str}")
+
+
+def archive_position_bars(position_id: int, exit_reason: str, final_pnl: float, final_r_multiple):
+    """Alla chiusura: copia tutte le righe live_position_bars di questa
+    posizione in live_closed_position_bars (con esito finale allegato),
+    poi CANCELLA le righe vive — evita bloat del D1 free tier, come
+    deciso in chat 21/07/2026 (log vivo solo mentre la posizione e'
+    aperta, archivio permanente separato dopo)."""
+    rows = d1_query(f"SELECT * FROM live_position_bars WHERE position_id = {position_id}")
+    if not rows:
+        print(f"    [archive-bars] nessuna riga di log trovata per position_id={position_id} (posizione chiusa troppo in fretta per un ciclo di log, o mai loggata).")
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def fv(v):
+        return "NULL" if v is None else (f"'{v}'" if isinstance(v, str) else str(v))
+
+    for r in rows:
+        d1_query(
+            "INSERT OR REPLACE INTO live_closed_position_bars "
+            "(position_id, instrument, strategy, bar_offset, timestamp, open, high, low, close, "
+            "current_price, price_r, adx, ema_fast, ema_slow, rsi, exit_reason, final_pnl, "
+            "final_r_multiple, archived_at) VALUES ("
+            f"{r['position_id']}, '{r['instrument']}', '{r['strategy']}', {r['bar_offset']}, "
+            f"'{r['timestamp']}', {fv(r['open'])}, {fv(r['high'])}, {fv(r['low'])}, {fv(r['close'])}, "
+            f"{fv(r['current_price'])}, {fv(r['price_r'])}, {fv(r['adx'])}, {fv(r['ema_fast'])}, "
+            f"{fv(r['ema_slow'])}, {fv(r['rsi'])}, '{exit_reason}', {fv(final_pnl)}, "
+            f"{fv(final_r_multiple)}, '{now_iso}')"
+        )
+    d1_query(f"DELETE FROM live_position_bars WHERE position_id = {position_id}")
+    print(f"    [archive-bars] {len(rows)} barre archiviate in live_closed_position_bars per position_id={position_id}, righe vive cancellate.")
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
@@ -317,7 +430,7 @@ def try_valvola(today_str: str, day_state: dict, risk_amount_needed_for_min: flo
     return nuovo_capitale, ancora_insufficiente
 
 
-def manage_open_positions(session: IGSession, today_str: str):
+def manage_open_positions(session: IGSession, today_str: str, hist_cache: dict):
     open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open'")
     if not open_positions:
         print("Nessuna posizione aperta da gestire.")
@@ -326,6 +439,7 @@ def manage_open_positions(session: IGSession, today_str: str):
     day_state = get_today_state(today_str)
     capital_v6 = day_state["capital_current_v6"]
     capital_mr = day_state["capital_current_mr"]
+    now = datetime.now(timezone.utc)
 
     for pos in open_positions:
         try:
@@ -338,6 +452,10 @@ def manage_open_positions(session: IGSession, today_str: str):
         if current_price is None:
             print(f"  [{pos['instrument']}/{pos['strategy']}] prezzo non disponibile, salto.")
             continue
+
+        # --- LOG BAR-PER-BAR (nuovo 21/07/2026): sempre, indipendentemente
+        # da un'eventuale chiusura piu' sotto in questo stesso ciclo ---
+        log_position_bar(pos, hist_cache, current_price, now)
 
         exit_reason = None
         if pos["direction"] == "long":
@@ -384,6 +502,10 @@ def manage_open_positions(session: IGSession, today_str: str):
             f"{pos['risk_amount']}, {pnl}, '{exit_reason}', "
             f"'{'falso segnale' if exit_reason == 'stop_loss' and pnl < 0 else 'NULL'}', 'si', '{pos['strategy']}')"
         )
+
+        # --- ARCHIVIAZIONE LOG BAR-PER-BAR (nuovo 21/07/2026) ---
+        r_multiple = pnl / pos["risk_amount"] if pos.get("risk_amount") else None
+        archive_position_bars(pos["id"], exit_reason, pnl, r_multiple)
 
         if pos["strategy"] == "mean_reversion":
             capital_mr += pnl
@@ -678,22 +800,25 @@ def main():
 
     creds = load_credentials_from_env()
     with IGSession(creds) as session:
-        print("--- 1) Gestione posizioni aperte (V6 + MR) ---")
-        manage_open_positions(session, today_str)
-
-        print("\n--- 1b) Verifica kill switch giornaliero (separato per pool) ---")
-        check_and_apply_kill_switches(session, today_str)
-
-        print("\n--- 1c) Tetto equity reale (Livello 1, protezione accantonato) ---")
-        apply_equity_cap(session, today_str)
-
-        print("\n--- 2) Scarico storico (riusato da entrambe le strategie) ---")
+        print("--- 1) Scarico storico (riusato da gestione posizioni + entrambe le strategie) ---")
+        # RIORDINATO 21/07/2026: prima era dopo la gestione posizioni — il
+        # log bar-per-bar (dentro manage_open_positions) ha bisogno degli
+        # indicatori calcolati su hist_cache, quindi va scaricato prima.
         now = datetime.now(timezone.utc)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         warmup_start = day_start - timedelta(days=WARMUP_DAYS)
         hist_cache = {}
         for name, const in SYMBOLS.items():
             hist_cache[name] = fetch_historical(const, warmup_start, now + timedelta(minutes=30))
+
+        print("\n--- 2) Gestione posizioni aperte (V6 + MR) + log bar-per-bar ---")
+        manage_open_positions(session, today_str, hist_cache)
+
+        print("\n--- 2b) Verifica kill switch giornaliero (separato per pool) ---")
+        check_and_apply_kill_switches(session, today_str)
+
+        print("\n--- 2c) Tetto equity reale (Livello 1, protezione accantonato) ---")
+        apply_equity_cap(session, today_str)
 
         print("\n--- 3) Rilevazione nuovi segnali V6 ---")
         detect_and_open_signals_v6(session, today_str, hist_cache)
