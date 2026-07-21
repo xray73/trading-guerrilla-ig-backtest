@@ -1,0 +1,39 @@
+name: Extract V6 Candidates (infrastruttura analisi via query)
+
+# Estrae TUTTI i segnali V6 validi (eseguiti o no) su DAX/FTSE100/GOLD,
+# 11 anni di storico, con path 48 barre NEUTRO (mai cappato a
+# stop/target/max_holding) e VIX/VIX3M al momento dell'ingresso.
+# Scrive in due tabelle D1 dedicate (research_v6_candidates,
+# research_v6_candidate_path), create IF NOT EXISTS — append-only,
+# nessun DROP, nessuna scrittura su tabelle ufficiali o su
+# research_v6_trade_features/path esistenti (solo LETTE per il flag
+# was_executed). Nessuna modifica a engine.py o alle sottoclassi.
+#
+# Prima esecuzione: full scan, puo' richiedere piu' tempo (molte righe
+# di path). Esecuzioni successive: solo candidati nuovi (skip di quelli
+# gia' in D1 via candidate_key).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extract-candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests yfinance
+
+      - name: Estrai candidati V6 (DAX/FTSE100/GOLD)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python extract_v6_candidates.py
