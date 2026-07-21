@@ -328,8 +328,22 @@ class Allocator:
 # =====================================================================
 
 SCOPES = {
+    # ATTENZIONE: DAX isolato NON e' confrontabile 1:1 con research_v6_trade_features
+    # (che include sempre la competizione di slot con FTSE100) — utile solo come
+    # diagnostica strutturale, MAI come sanity check di conteggio trade.
     "dax_2015_2016": {"instruments": ["DAX"], "start": "2015-01-05", "end": "2017-01-01"},
+    # Scope corretto per il sanity check: entrambi gli strumenti, stessa
+    # competizione di slot della storia reale — 2015-2016 come primo periodo.
+    "dax_ftse_2015_2016": {"instruments": ["DAX", "FTSE100"], "start": "2015-01-05", "end": "2017-01-01"},
     "full": {"instruments": ["DAX", "FTSE100"], "start": "2015-01-05", "end": "2027-01-01"},
+}
+
+CAPITAL0_BY_SCOPE = {
+    # 2.000 EUR verificato dal risk_amount del primo trade reale (40 = 2000*2%)
+    # per ciascuno dei 5 periodi ufficiali (reset a inizio periodo).
+    "dax_2015_2016": 2000.0,
+    "dax_ftse_2015_2016": 2000.0,
+    "full": 2000.0,
 }
 
 
@@ -397,7 +411,7 @@ def main():
     masked_all.sort(key=lambda m: m.entry_time)
 
     print("Fase 2 — Allocazione sequenziale (floating kill switch bar-by-bar)...")
-    capital0 = 2000.0 if TEST_SCOPE == "full" else 900.0  # scope ridotto: capitale arbitrario, solo per test struttura
+    capital0 = CAPITAL0_BY_SCOPE[TEST_SCOPE]
     allocator = Allocator(capital0=capital0, p=eng.PARAMS, instruments=eng.INSTRUMENTS)
     trades_df = allocator.run(masked_all, path_by_key)
     print(f"  {len(trades_df)} trade generati dall'allocatore.")
@@ -406,10 +420,17 @@ def main():
         print(f"  Distribuzione exit_reason:\n{trades_df['exit_reason'].value_counts().to_string()}")
 
     if TEST_SCOPE == "dax_2015_2016":
-        print("\n=== SANITY CHECK contro research_v6_trade_features (DAX, 2015-2016) ===")
+        print("\n=== NOTA: scope DAX isolato — NON comparabile 1:1 con research_v6_trade_features ===")
+        print("  (manca la competizione di slot con FTSE100 presente nella storia reale — "
+              "usare 'dax_ftse_2015_2016' per il sanity check vero).")
+    elif TEST_SCOPE in ("dax_ftse_2015_2016", "full"):
+        label = "2015-2016" if TEST_SCOPE == "dax_ftse_2015_2016" else "tutto lo storico"
+        print(f"\n=== SANITY CHECK contro research_v6_trade_features (DAX+FTSE100, {label}) ===")
+        inst_list = "', '".join(scope["instruments"])
         ref = d1_query(
-            "SELECT COUNT(*) as n, ROUND(SUM(pnl),2) as pnl_tot FROM research_v6_trade_features "
-            "WHERE instrument='DAX' AND entry_time >= '2015-01-05' AND entry_time < '2017-01-01'",
+            f"SELECT COUNT(*) as n, ROUND(SUM(pnl),2) as pnl_tot FROM research_v6_trade_features "
+            f"WHERE instrument IN ('{inst_list}') AND entry_time >= '{scope['start']}' "
+            f"AND entry_time < '{scope['end']}'",
             account_id, token)
         n_ref = ref[0]["n"]
         pnl_ref = ref[0]["pnl_tot"]
