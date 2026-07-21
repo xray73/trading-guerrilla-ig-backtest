@@ -2,7 +2,29 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
-AGGIORNAMENTO 21/07/2026 — LOG BAR-PER-BAR POSIZIONI APERTE:
+AGGIORNAMENTO 21/07/2026 (parte 2) — TRACKING CANDIDATI LIVE:
+Estende detect_and_open_signals_v6/mr per registrare OGNI segnale
+valido generato (eseguito o no) in research_v6/mr_candidates +
+live_v6/mr_candidates_tracking (stesso formato candidate_key di
+extract_v6/mr_candidates.py: f"{instrument}_{entry_time.isoformat()}",
+entry_time = barra successiva alla barra di segnale). Rimosso lo skip
+anticipato "if name in open_instruments: continue" — il segnale viene
+ORA sempre calcolato per ogni strumento, poi si decide separatamente
+se aprire l'ordine o solo tracciare il candidato (skip_reason
+esplicito: kill_switch_attivo, limite_ordini_giorno, slot_pieno,
+strumento_gia_in_posizione, atr_non_disponibile,
+prezzo_non_disponibile, size_sotto_minimo_dopo_valvola [solo MR],
+dry_run). Nuova funzione log_candidate_bars() logga ad ogni ciclo la
+prossima barra disponibile per ogni candidato ancora in tracking, in
+live_v6/mr_candidate_bars (completo quando esiste bar_offset=48,
+nessun flag is_complete separato — stesso principio di
+live_position_bars -> live_closed_position_bars). Nessuna modifica
+alla logica di sizing/kill-switch/accantonamento esistente. Tabelle
+live_v6/mr_candidates_tracking e live_v6/mr_candidate_bars gia'
+create manualmente su D1 (IF NOT EXISTS, non da questo script),
+comprese di colonna skip_reason aggiunta il 21/07/2026.
+
+AGGIORNAMENTO 21/07/2026 (parte 1) — LOG BAR-PER-BAR POSIZIONI APERTE:
 Aggiunto `live_position_bars` (aggiornata OGNI ciclo mentre una
 posizione resta aperta) + `live_closed_position_bars` (archivio
 permanente, popolato e la riga viva cancellata alla chiusura — evita
@@ -38,6 +60,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import yfinance as yf
 
 import dukascopy_python
 from dukascopy_python.instruments import INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100
@@ -129,7 +152,7 @@ def _diag_mr(name: str, row: pd.Series, mode: str) -> str:
 
 
 # =====================================================================
-# LOG BAR-PER-BAR POSIZIONI APERTE (nuovo 21/07/2026)
+# LOG BAR-PER-BAR POSIZIONI APERTE (21/07/2026, parte 1)
 # =====================================================================
 
 def _last_closed_indicators(name: str, strategy: str, hist_cache: dict, now: datetime):
@@ -226,6 +249,222 @@ def archive_position_bars(position_id: int, exit_reason: str, final_pnl: float, 
         )
     d1_query(f"DELETE FROM live_position_bars WHERE position_id = {position_id}")
     print(f"    [archive-bars] {len(rows)} barre archiviate in live_closed_position_bars per position_id={position_id}, righe vive cancellate.")
+
+
+# =====================================================================
+# TRACKING CANDIDATI LIVE (21/07/2026, parte 2)
+# Registra OGNI segnale valido (eseguito o no) in research_v6/mr_
+# candidates + live_v6/mr_candidates_tracking, con candidate_key nello
+# STESSO formato usato da extract_v6/mr_candidates.py:
+# f"{instrument}_{entry_time.isoformat()}" (entry_time = barra
+# successiva alla barra di segnale) — cosi' un futuro merge/dedup con
+# i dataset batch storici e' diretto, nessuna incoerenza di chiave.
+# =====================================================================
+
+_vix_cache: dict = {}
+
+
+def get_current_vix_vix3m():
+    """VIX/VIX3M piu' recenti disponibili (best-effort, non bloccante).
+    Cache per singola esecuzione di main() — un solo fetch anche se
+    richiesto da piu' candidati nello stesso ciclo."""
+    if "vix" in _vix_cache:
+        return _vix_cache["vix"], _vix_cache["vix3m"]
+    try:
+        vix = yf.download("^VIX", period="5d", progress=False)
+        vix3m = yf.download("^VIX3M", period="5d", progress=False)
+        for df in (vix, vix3m):
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+        vix_val = float(vix["Close"].iloc[-1]) if not vix.empty else None
+        vix3m_val = float(vix3m["Close"].iloc[-1]) if not vix3m.empty else None
+    except Exception as e:
+        print(f"  [vix] impossibile scaricare VIX/VIX3M ({e}) — campi lasciati NULL.")
+        vix_val, vix3m_val = None, None
+    _vix_cache["vix"], _vix_cache["vix3m"] = vix_val, vix3m_val
+    return vix_val, vix3m_val
+
+
+def count_consecutive_backward(bool_series: pd.Series, end_idx: int) -> int:
+    """Identica a quella in extract_v6/mr_candidates.py — nessuna
+    reimplementazione divergente."""
+    i = end_idx
+    count = 0
+    while i >= 0 and bool(bool_series.iloc[i]):
+        count += 1
+        i -= 1
+    return count
+
+
+def _fv(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "NULL"
+    if isinstance(v, str):
+        return "'" + v.replace("'", "''") + "'"
+    return str(v)
+
+
+def record_candidate_v6(name: str, signals: pd.DataFrame, last_closed_idx: int,
+                         now: datetime, was_executed: int, skip_reason: str | None,
+                         matched_trade_key: str | None = None) -> str:
+    prev_bar = signals.iloc[last_closed_idx]
+    direction = prev_bar["signal"]
+    entry_time_dt = prev_bar["timestamp"] + timedelta(minutes=30)
+    candidate_key = f"{name}_{entry_time_dt.isoformat()}"
+
+    breakout_level = prev_bar["rolling_high"] if direction == "long" else prev_bar["rolling_low"]
+    breakout_dist = (((prev_bar["close"] - breakout_level) if direction == "long"
+                       else (breakout_level - prev_bar["close"]))
+                      if pd.notna(breakout_level) else None)
+
+    persistence = count_consecutive_backward(signals["signal"] == direction, last_closed_idx)
+    adx_regime_age = count_consecutive_backward(
+        signals["adx"] > eng.PARAMS.adx_min_context, last_closed_idx)
+
+    vix_val, vix3m_val = get_current_vix_vix3m()
+
+    cols = ("candidate_key, instrument, direction, entry_time, signal_bar_time, "
+            "adx_at_entry, atr_at_entry, ema_fast_entry, ema_slow_entry, "
+            "ema_broad_fast_entry, ema_broad_slow_entry, close_entry, "
+            "breakout_level_entry, breakout_distance_pts, persistence_bars, "
+            "adx_regime_age_bars, vix_entry, vix3m_entry, was_executed, "
+            "matched_trade_key, skip_reason")
+
+    vals = (
+        f"{_fv(candidate_key)}, {_fv(name)}, {_fv(direction)}, {_fv(entry_time_dt.isoformat())}, "
+        f"{_fv(prev_bar['timestamp'].isoformat())}, "
+        f"{_fv(float(prev_bar['adx']) if pd.notna(prev_bar['adx']) else None)}, "
+        f"{_fv(float(prev_bar['atr']) if pd.notna(prev_bar['atr']) else None)}, "
+        f"{_fv(float(prev_bar['ema_fast']) if pd.notna(prev_bar['ema_fast']) else None)}, "
+        f"{_fv(float(prev_bar['ema_slow']) if pd.notna(prev_bar['ema_slow']) else None)}, "
+        f"{_fv(float(prev_bar['ema_broad_fast']) if pd.notna(prev_bar['ema_broad_fast']) else None)}, "
+        f"{_fv(float(prev_bar['ema_broad_slow']) if pd.notna(prev_bar['ema_broad_slow']) else None)}, "
+        f"{_fv(float(prev_bar['close']))}, "
+        f"{_fv(float(breakout_level) if pd.notna(breakout_level) else None)}, "
+        f"{_fv(float(breakout_dist) if breakout_dist is not None and pd.notna(breakout_dist) else None)}, "
+        f"{persistence}, {adx_regime_age}, {_fv(vix_val)}, {_fv(vix3m_val)}, {was_executed}, "
+        f"{_fv(matched_trade_key)}, {_fv(skip_reason)}"
+    )
+
+    d1_query(f"INSERT OR REPLACE INTO research_v6_candidates ({cols}, extraction_run_at) "
+             f"VALUES ({vals}, {_fv(now.isoformat())})")
+    d1_query(f"INSERT OR REPLACE INTO live_v6_candidates_tracking ({cols}, created_at) "
+             f"VALUES ({vals}, {_fv(now.isoformat())})")
+    print(f"    [candidate/V6/{name}] {candidate_key} "
+          f"(was_executed={was_executed}, skip_reason={skip_reason})")
+    return candidate_key
+
+
+def record_candidate_mr(name: str, signals: pd.DataFrame, last_closed_idx: int,
+                         now: datetime, was_executed: int, skip_reason: str | None,
+                         matched_trade_key: str | None = None) -> str:
+    prev_bar = signals.iloc[last_closed_idx]
+    direction = prev_bar["signal"]
+    entry_time_dt = prev_bar["timestamp"] + timedelta(minutes=30)
+    candidate_key = f"{name}_{entry_time_dt.isoformat()}"
+
+    persistence = count_consecutive_backward(signals["signal"] == direction, last_closed_idx)
+    # NB: stessa soglia di extract_mr_candidates.py (eng.PARAMS.adx_min_context,
+    # non ADX_THRESHOLD di mean_reversion_signals — stesso valore numerico,
+    # costante diversa, mantenuta per coerenza esatta col dataset batch)
+    adx_regime_age = count_consecutive_backward(
+        signals["adx"] < eng.PARAMS.adx_min_context, last_closed_idx)
+
+    vix_val, vix3m_val = get_current_vix_vix3m()
+    rsi_val = float(prev_bar["rsi"]) if "rsi" in prev_bar.index and pd.notna(prev_bar["rsi"]) else None
+
+    cols = ("candidate_key, instrument, direction, entry_time, signal_bar_time, "
+            "adx_at_entry, atr_at_entry, rsi_at_entry, close_entry, "
+            "persistence_bars, adx_regime_age_bars, vix_entry, vix3m_entry, "
+            "was_executed, matched_trade_key, skip_reason")
+
+    vals = (
+        f"{_fv(candidate_key)}, {_fv(name)}, {_fv(direction)}, {_fv(entry_time_dt.isoformat())}, "
+        f"{_fv(prev_bar['timestamp'].isoformat())}, "
+        f"{_fv(float(prev_bar['adx']) if pd.notna(prev_bar['adx']) else None)}, "
+        f"{_fv(float(prev_bar['atr']) if pd.notna(prev_bar['atr']) else None)}, "
+        f"{_fv(rsi_val)}, {_fv(float(prev_bar['close']))}, "
+        f"{persistence}, {adx_regime_age}, {_fv(vix_val)}, {_fv(vix3m_val)}, {was_executed}, "
+        f"{_fv(matched_trade_key)}, {_fv(skip_reason)}"
+    )
+
+    d1_query(f"INSERT OR REPLACE INTO research_mr_candidates ({cols}, extraction_run_at) "
+             f"VALUES ({vals}, {_fv(now.isoformat())})")
+    d1_query(f"INSERT OR REPLACE INTO live_mr_candidates_tracking ({cols}, created_at) "
+             f"VALUES ({vals}, {_fv(now.isoformat())})")
+    print(f"    [candidate/MR/{name}] {candidate_key} "
+          f"(was_executed={was_executed}, skip_reason={skip_reason})")
+    return candidate_key
+
+
+def log_candidate_bars(strategy: str, hist_cache: dict, now: datetime):
+    """Ad ogni ciclo, scrive la prossima barra disponibile per ogni
+    candidato ancora 'in tracking' (bar_offset non ancora a 48). Nessun
+    flag is_complete separato: un candidato e' completo quando esiste
+    la riga con bar_offset=48 nella tabella *_bars — stesso principio
+    gia' usato per live_position_bars -> live_closed_position_bars."""
+    tracking_table = "live_v6_candidates_tracking" if strategy == "v6" else "live_mr_candidates_tracking"
+    bars_table = "live_v6_candidate_bars" if strategy == "v6" else "live_mr_candidate_bars"
+
+    rows = d1_query(f"SELECT candidate_key, instrument, entry_time FROM {tracking_table}")
+    if not rows:
+        return
+
+    for r in rows:
+        max_offset_rows = d1_query(
+            f"SELECT MAX(bar_offset) as mx FROM {bars_table} WHERE candidate_key = '{r['candidate_key']}'"
+        )
+        current_max = max_offset_rows[0]["mx"] if max_offset_rows else None
+        next_offset = 0 if current_max is None else int(current_max) + 1
+        if next_offset > 48:
+            continue  # gia' completo, nulla da fare
+
+        entry_time_dt = pd.Timestamp(r["entry_time"]).to_pydatetime()
+        target_ts = entry_time_dt + timedelta(minutes=30 * next_offset)
+        if target_ts > now:
+            continue  # barra target non ancora chiusa
+
+        name = r["instrument"]
+        hist = hist_cache.get(name)
+        if hist is None:
+            continue
+        inst = eng.INSTRUMENTS[name]
+        if strategy == "v6":
+            signals = eng.generate_signals(hist, inst)
+        else:
+            signals = generate_mean_reversion_signals(hist, inst, mode=MR_MODE)
+
+        match = signals[signals["timestamp"] == pd.Timestamp(target_ts, tz="UTC")]
+        if match.empty:
+            continue
+        bar = match.iloc[0]
+
+        cols = "candidate_key, bar_offset, timestamp, open, high, low, close, price_r, adx"
+        if strategy == "v6":
+            cols += ", ema_fast, ema_slow"
+        else:
+            cols += ", rsi, ema_fast, ema_slow"
+
+        vals = (
+            f"{_fv(r['candidate_key'])}, {next_offset}, {_fv(bar['timestamp'].isoformat())}, "
+            f"{_fv(float(bar['open']) if pd.notna(bar['open']) else None)}, "
+            f"{_fv(float(bar['high']) if pd.notna(bar['high']) else None)}, "
+            f"{_fv(float(bar['low']) if pd.notna(bar['low']) else None)}, "
+            f"{_fv(float(bar['close']) if pd.notna(bar['close']) else None)}, "
+            f"NULL, "  # price_r: da calcolare con lo stop_distance del candidato se serve in futuro
+            f"{_fv(float(bar['adx']) if pd.notna(bar['adx']) else None)}"
+        )
+        if strategy == "v6":
+            vals += (f", {_fv(float(bar['ema_fast']) if pd.notna(bar['ema_fast']) else None)}, "
+                      f"{_fv(float(bar['ema_slow']) if pd.notna(bar['ema_slow']) else None)}")
+        else:
+            rsi_v = float(bar["rsi"]) if "rsi" in bar.index and pd.notna(bar["rsi"]) else None
+            vals += (f", {_fv(rsi_v)}, "
+                      f"{_fv(float(bar['ema_fast']) if pd.notna(bar['ema_fast']) else None)}, "
+                      f"{_fv(float(bar['ema_slow']) if pd.notna(bar['ema_slow']) else None)}")
+
+        d1_query(f"INSERT OR REPLACE INTO {bars_table} ({cols}) VALUES ({vals})")
+    print(f"  [candidate-bars/{strategy}] {len(rows)} candidati in tracking, barre aggiornate dove disponibili.")
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
@@ -584,32 +823,32 @@ def check_and_apply_kill_switches(session: IGSession, today_str: str):
 
 def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: dict):
     day_state = get_today_state(today_str)
-    if day_state.get("kill_switch_triggered_v6"):
-        print("[V6] Kill switch attivo oggi — nessun nuovo ordine.")
-        return
-    if (day_state.get("orders_today_v6") or 0) >= eng.PARAMS.max_new_orders_per_day:
-        print("[V6] Limite ordini/giorno raggiunto — nessun nuovo ordine.")
-        return
-
-    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'v6'")
-    if len(open_positions) >= eng.PARAMS.max_concurrent_positions:
-        print("[V6] Nessuno slot concorrente libero — nessun nuovo ordine.")
-        return
-    open_instruments = {p["instrument"] for p in open_positions}
-
     now = datetime.now(timezone.utc)
     capital = day_state["capital_current_v6"]
 
+    kill_switch_on = bool(day_state.get("kill_switch_triggered_v6"))
+    orders_limit_hit = (day_state.get("orders_today_v6") or 0) >= eng.PARAMS.max_new_orders_per_day
+
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'v6'")
+    slots_full = len(open_positions) >= eng.PARAMS.max_concurrent_positions
+    open_instruments = {p["instrument"] for p in open_positions}
+
+    if kill_switch_on:
+        print("[V6] Kill switch attivo oggi — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+    if orders_limit_hit:
+        print("[V6] Limite ordini/giorno raggiunto — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+    if slots_full:
+        print("[V6] Nessuno slot concorrente libero — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+
     for name in SYMBOLS:
-        if name in open_instruments:
-            continue
         inst = eng.INSTRUMENTS[name]
         hist = hist_cache[name]
         signals = eng.generate_signals(hist, inst)
         closed = signals[signals["timestamp"] + timedelta(minutes=30) <= now]
         if closed.empty:
             continue
-        last_closed = closed.iloc[-1]
+        last_closed_idx = closed.index[-1]
+        last_closed = signals.loc[last_closed_idx]
 
         # --- DIAGNOSTICA (nuovo 20/07/2026): sempre stampata, segnale o no ---
         print(_diag_v6(name, last_closed))
@@ -619,18 +858,39 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
             print(f"  [V6/{name}] nessun segnale.")
             continue
 
+        # --- determina motivo di skip, se presente (priorita' fissa) ---
+        skip_reason = None
+        if kill_switch_on:
+            skip_reason = "kill_switch_attivo"
+        elif orders_limit_hit:
+            skip_reason = "limite_ordini_giorno"
+        elif slots_full:
+            skip_reason = "slot_pieno"
+        elif name in open_instruments:
+            skip_reason = "strumento_gia_in_posizione"
+
+        if skip_reason:
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0, skip_reason=skip_reason)
+            continue
+
         atr = last_closed["atr"]
         if pd.isna(atr):
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="atr_non_disponibile")
             print(f"  [V6/{name}] ATR non disponibile, salto.")
             continue
 
         try:
             price = session.get_price(name)
         except Exception as e:
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="prezzo_non_disponibile")
             print(f"  [V6/{name}] impossibile leggere il prezzo per l'ordine ({e}), salto.")
             continue
         entry_price = price["offer"] if sig == "long" else price["bid"]
         if entry_price is None:
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="prezzo_non_disponibile")
             print(f"  [V6/{name}] prezzo non disponibile, salto.")
             continue
 
@@ -661,6 +921,8 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
         )
 
         if DRY_RUN:
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="dry_run")
             print(f"    Simulato, nessuna scrittura in live_positions (solo in modalità reale).")
             continue
 
@@ -680,7 +942,9 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
             f"UPDATE live_daily_state SET orders_today_v6 = orders_today_v6 + 1, "
             f"capital_current_v6 = {capital} WHERE trade_date = '{today_str}'"
         )
-        print(f"    Posizione V6 aperta su IG, deal_id={deal_id}")
+        candidate_key = record_candidate_v6(name, signals, last_closed_idx, now, was_executed=1,
+                                             skip_reason=None)
+        print(f"    Posizione V6 aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
 
 
 def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: dict):
@@ -689,32 +953,32 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
     variante RSI, e size che SALTA (non forza) sotto il minimo se la
     valvola non basta a coprire il gap."""
     day_state = get_today_state(today_str)
-    if day_state.get("kill_switch_triggered_mr"):
-        print("[MR] Kill switch attivo oggi — nessun nuovo ordine.")
-        return
-    if (day_state.get("orders_today_mr") or 0) >= eng.PARAMS.max_new_orders_per_day:
-        print("[MR] Limite ordini/giorno raggiunto — nessun nuovo ordine.")
-        return
-
-    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'mean_reversion'")
-    if len(open_positions) >= eng.PARAMS.max_concurrent_positions:
-        print("[MR] Nessuno slot concorrente libero — nessun nuovo ordine.")
-        return
-    open_instruments = {p["instrument"] for p in open_positions}
-
     now = datetime.now(timezone.utc)
     capital = day_state["capital_current_mr"]
 
+    kill_switch_on = bool(day_state.get("kill_switch_triggered_mr"))
+    orders_limit_hit = (day_state.get("orders_today_mr") or 0) >= eng.PARAMS.max_new_orders_per_day
+
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open' AND strategy = 'mean_reversion'")
+    slots_full = len(open_positions) >= eng.PARAMS.max_concurrent_positions
+    open_instruments = {p["instrument"] for p in open_positions}
+
+    if kill_switch_on:
+        print("[MR] Kill switch attivo oggi — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+    if orders_limit_hit:
+        print("[MR] Limite ordini/giorno raggiunto — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+    if slots_full:
+        print("[MR] Nessuno slot concorrente libero — nessun nuovo ordine (segnali comunque calcolati e tracciati).")
+
     for name in SYMBOLS:
-        if name in open_instruments:
-            continue
         inst = eng.INSTRUMENTS[name]
         hist = hist_cache[name]
         signals = generate_mean_reversion_signals(hist, inst, mode=MR_MODE)
         closed = signals[signals["timestamp"] + timedelta(minutes=30) <= now]
         if closed.empty:
             continue
-        last_closed = closed.iloc[-1]
+        last_closed_idx = closed.index[-1]
+        last_closed = signals.loc[last_closed_idx]
 
         # --- DIAGNOSTICA (nuovo 20/07/2026): sempre stampata, segnale o no ---
         print(_diag_mr(name, last_closed, MR_MODE))
@@ -724,18 +988,38 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
             print(f"  [MR/{name}] nessun segnale.")
             continue
 
+        skip_reason = None
+        if kill_switch_on:
+            skip_reason = "kill_switch_attivo"
+        elif orders_limit_hit:
+            skip_reason = "limite_ordini_giorno"
+        elif slots_full:
+            skip_reason = "slot_pieno"
+        elif name in open_instruments:
+            skip_reason = "strumento_gia_in_posizione"
+
+        if skip_reason:
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0, skip_reason=skip_reason)
+            continue
+
         atr = last_closed["atr"]
         if pd.isna(atr):
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="atr_non_disponibile")
             print(f"  [MR/{name}] ATR non disponibile, salto.")
             continue
 
         try:
             price = session.get_price(name)
         except Exception as e:
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="prezzo_non_disponibile")
             print(f"  [MR/{name}] impossibile leggere il prezzo per l'ordine ({e}), salto.")
             continue
         entry_price = price["offer"] if sig == "long" else price["bid"]
         if entry_price is None:
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="prezzo_non_disponibile")
             print(f"  [MR/{name}] prezzo non disponibile, salto.")
             continue
 
@@ -752,6 +1036,8 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
             size = risk_amount / (stop_distance_pts * inst.point_value)
 
             if ancora_insufficiente or size < inst.min_tradable_size:
+                record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                     skip_reason="size_sotto_minimo_dopo_valvola")
                 print(f"  [MR/{name}] segnale {sig.upper()} SALTATO — size calcolata {size:.3f} "
                       f"sotto il minimo {inst.min_tradable_size} anche dopo la valvola "
                       f"(capitale pool MR={capital:.2f} EUR insufficiente). "
@@ -768,6 +1054,8 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
         )
 
         if DRY_RUN:
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="dry_run")
             print(f"    Simulato, nessuna scrittura in live_positions (solo in modalità reale).")
             continue
 
@@ -787,7 +1075,9 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
             f"UPDATE live_daily_state SET orders_today_mr = orders_today_mr + 1, "
             f"capital_current_mr = {capital} WHERE trade_date = '{today_str}'"
         )
-        print(f"    Posizione MR aperta su IG, deal_id={deal_id}")
+        candidate_key = record_candidate_mr(name, signals, last_closed_idx, now, was_executed=1,
+                                             skip_reason=None)
+        print(f"    Posizione MR aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
 
 
 def main():
@@ -825,6 +1115,10 @@ def main():
 
         print("\n--- 4) Rilevazione nuovi segnali mean-reversion (RSI) ---")
         detect_and_open_signals_mr(session, today_str, hist_cache)
+
+        print("\n--- 5) Log barre candidati in tracking (V6 + MR) ---")
+        log_candidate_bars("v6", hist_cache, now)
+        log_candidate_bars("mr", hist_cache, now)
 
     print("\n=== Completato. ===")
 
