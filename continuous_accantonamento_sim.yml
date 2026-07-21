@@ -1,0 +1,27 @@
+name: Continuous Accantonamento Simulation (11 anni filati)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  continuous-accantonamento-sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui simulazione continua
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python continuous_accantonamento_sim.py
