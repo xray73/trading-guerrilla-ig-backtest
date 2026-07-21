@@ -1,0 +1,35 @@
+name: Extract MR Candidates (infrastruttura analisi via query)
+
+# Estrae TUTTI i segnali mean-reversion (RSI, ADX<20) validi su
+# DAX/FTSE100, eseguiti o no, con path 48 barre NEUTRO e VIX/VIX3M.
+# Il flag was_executed viene calcolato facendo girare il motore reale
+# di produzione (BacktestEngineMeanReversion, 600 EUR, 5 periodi
+# ufficiali) — non esiste una tabella D1 di riferimento gia' pronta
+# per MR come per V6. Scrive in due tabelle dedicate (IF NOT EXISTS,
+# append-only). Nessuna modifica a engine.py, engine_mean_reversion.py
+# o mean_reversion_signals.py.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extract-mr-candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests yfinance
+
+      - name: Estrai candidati MR (DAX/FTSE100)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python extract_mr_candidates.py
