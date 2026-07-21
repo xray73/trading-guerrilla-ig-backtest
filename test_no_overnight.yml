@@ -1,0 +1,41 @@
+name: Test 5 - No Overnight
+
+# TEST 5/6 del programma di validazione. Un solo script: motore +
+# sanity check + confronto sui 5 periodi + bootstrap A RISCHIO FISSO
+# (versione corretta), tutto in un run. Chiude forzatamente al primo
+# cutoff overnight invece di lasciare aperto. Nessuna modifica a
+# engine.py/sottoclassi esistenti.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test-no-overnight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Test no-overnight (motore + bootstrap a rischio fisso)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python test_no_overnight.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-no-overnight-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: warn
