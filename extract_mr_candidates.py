@@ -64,7 +64,8 @@ D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
 D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 SYMBOLS = ["DAX", "FTSE100"]
-PATH_BARS = 48
+PATH_BARS = 49  # FIX 21/07/2026: vedi commento in extract_v6_candidates.py — bars_held>=max_holding
+                # scatta a offset 48, non 47
 MR_CAPITAL = 600.0  # sotto-pool reale 30% di 2.000 EUR (Decision Log 17-18/07/2026)
 
 PERIODS = [
