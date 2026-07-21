@@ -2,6 +2,34 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
+AGGIORNAMENTO 21/07/2026 (parte 3) — LIVELLO 3: MARGINE REALE AGGREGATO:
+Il tetto equity (Livello 1) confronta solo il capitale di RISCHIO
+tracciato (capital_v6+capital_mr) contro l'equity reale — non il
+MARGINE effettivamente bloccato da IG per le posizioni aperte in
+questo istante. Gap scoperto in chat: capital_v6/capital_mr non si
+riducono mai all'apertura di una posizione (solo alla chiusura, col
+PnL), quindi il motore poteva in teoria calcolare size "corrette" per
+il pool ma per cui IG non aveva più margine libero reale (specialmente
+con fino a 4 posizioni concorrenti possibili: V6 max 2 + MR max 2,
+condividono lo stesso conto/equity reale ma i loro pool sono contabili
+separati). Stesso gap esisteva già nel backtest offline (engine.py,
+_position_size: controllo margine c'è ma confronta solo contro
+self.capital totale del pool, mai contro margine già impegnato da
+altre posizioni concorrenti nello stesso pool — mai testato il caso
+V6+MR condividenti lo stesso conto).
+
+Nuova funzione compute_margin_state(): legge equity reale IG + somma
+il margine di TUTTE le posizioni aperte (V6+MR, prezzo corrente) →
+margine_libero. Prima di ogni nuovo ordine (in detect_and_open_signals_
+v6/mr, dopo il sizing finale) si verifica che margin_required non superi
+margine_libero — se insufficiente, skip_reason="margine_insufficiente"
+(niente "forza al minimo" qui: forzare la size aumenterebbe il margine
+richiesto, l'opposto di quanto serve). margine_libero si aggiorna
+dentro lo stesso ciclo quando un ordine viene REALMENTE piazzato
+(non-DRY_RUN), cosi' un secondo segnale nello stesso giro (es. V6 poi
+MR) vede il margine gia' ridotto. Fail-safe: se equity non leggibile,
+warning e nessun blocco (stesso pattern gia' usato in apply_equity_cap).
+
 AGGIORNAMENTO 21/07/2026 (parte 2) — TRACKING CANDIDATI LIVE:
 Estende detect_and_open_signals_v6/mr per registrare OGNI segnale
 valido generato (eseguito o no) in research_v6/mr_candidates +
@@ -14,13 +42,12 @@ se aprire l'ordine o solo tracciare il candidato (skip_reason
 esplicito: kill_switch_attivo, limite_ordini_giorno, slot_pieno,
 strumento_gia_in_posizione, atr_non_disponibile,
 prezzo_non_disponibile, size_sotto_minimo_dopo_valvola [solo MR],
-dry_run). Nuova funzione log_candidate_bars() logga ad ogni ciclo la
-prossima barra disponibile per ogni candidato ancora in tracking, in
-live_v6/mr_candidate_bars (completo quando esiste bar_offset=48,
-nessun flag is_complete separato — stesso principio di
-live_position_bars -> live_closed_position_bars). Nessuna modifica
-alla logica di sizing/kill-switch/accantonamento esistente. Tabelle
-live_v6/mr_candidates_tracking e live_v6/mr_candidate_bars gia'
+margine_insufficiente, dry_run). Nuova funzione log_candidate_bars()
+logga ad ogni ciclo la prossima barra disponibile per ogni candidato
+ancora in tracking, in live_v6/mr_candidate_bars (completo quando
+esiste bar_offset=48, nessun flag is_complete separato — stesso
+principio di live_position_bars -> live_closed_position_bars).
+Tabelle live_v6/mr_candidates_tracking e live_v6/mr_candidate_bars gia'
 create manualmente su D1 (IF NOT EXISTS, non da questo script),
 comprese di colonna skip_reason aggiunta il 21/07/2026.
 
@@ -249,6 +276,51 @@ def archive_position_bars(position_id: int, exit_reason: str, final_pnl: float, 
         )
     d1_query(f"DELETE FROM live_position_bars WHERE position_id = {position_id}")
     print(f"    [archive-bars] {len(rows)} barre archiviate in live_closed_position_bars per position_id={position_id}, righe vive cancellate.")
+
+
+# =====================================================================
+# LIVELLO 3 — MARGINE REALE AGGREGATO (nuovo 21/07/2026, parte 3)
+# =====================================================================
+
+def compute_margin_state(session: IGSession) -> float | None:
+    """Legge l'equity reale IG e somma il margine impegnato da TUTTE le
+    posizioni aperte (V6+MR insieme, condividono lo stesso conto/margine
+    reale anche se i pool di capitale sono contabili separati). Ritorna
+    margine_libero, o None se l'equity non e' leggibile (fail-safe: il
+    chiamante non blocca in questo caso, stesso pattern di apply_equity_cap)."""
+    try:
+        bal = session.get_account_balance()
+        equity_reale = bal["equity"]
+    except Exception as e:
+        print(f"  [margine L3] impossibile leggere l'equity reale da IG ({e}) — "
+              f"controllo margine disattivato questo ciclo (fail-safe, nessun blocco).")
+        return None
+
+    open_positions = d1_query("SELECT * FROM live_positions WHERE status = 'open'")
+    instruments_needed = {p["instrument"] for p in open_positions}
+    price_cache = {}
+    for name in instruments_needed:
+        try:
+            price_cache[name] = session.get_price(name)
+        except Exception as e:
+            print(f"  [margine L3] impossibile leggere prezzo {name} ({e}) — "
+                  f"posizioni su questo strumento escluse dal calcolo margine questo ciclo.")
+
+    margine_impegnato = 0.0
+    for pos in open_positions:
+        price = price_cache.get(pos["instrument"])
+        if price is None:
+            continue
+        current_price = price["bid"] if pos["direction"] == "long" else price["offer"]
+        if current_price is None:
+            continue
+        inst = eng.INSTRUMENTS[pos["instrument"]]
+        margine_impegnato += pos["size"] * current_price * inst.point_value * inst.margin_pct
+
+    margine_libero = equity_reale - margine_impegnato
+    print(f"  [margine L3] equity={equity_reale:.2f}  margine_impegnato(V6+MR)={margine_impegnato:.2f}  "
+          f"margine_libero={margine_libero:.2f}")
+    return margine_libero
 
 
 # =====================================================================
@@ -821,7 +893,8 @@ def check_and_apply_kill_switches(session: IGSession, today_str: str):
                   f"(soglia {threshold_pct*100:.2f}%) — {'GIA ATTIVO' if already_triggered else 'sotto soglia'}")
 
 
-def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: dict):
+def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: dict,
+                                margine_libero: float | None) -> float | None:
     day_state = get_today_state(today_str)
     now = datetime.now(timezone.utc)
     capital = day_state["capital_current_v6"]
@@ -910,10 +983,22 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
                 size = inst.min_tradable_size
                 forced_min = True
 
+        # --- LIVELLO 3 (nuovo 21/07/2026): controllo margine reale aggregato
+        # V6+MR, dopo il sizing finale (risk/min-forcing/valvola). Niente
+        # "forza al minimo" qui: forzare la size aumenterebbe il margine
+        # richiesto, l'opposto di quanto serve se il margine e' il vincolo. ---
+        margin_required = size * entry_price * inst.point_value * inst.margin_pct
+        if margine_libero is not None and margin_required > margine_libero:
+            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="margine_insufficiente")
+            print(f"  [V6/{name}] margine insufficiente: richiesto {margin_required:.2f} EUR, "
+                  f"libero {margine_libero:.2f} EUR — salto.")
+            continue
+
         direction = "BUY" if sig == "long" else "SELL"
         print(f"  [V6/{name}] segnale {sig.upper()} — size={size:.2f} "
               f"(forzata al minimo={forced_min}) stop={stop_distance_pts:.1f}pt "
-              f"target={limit_distance_pts:.1f}pt (dry_run={DRY_RUN})")
+              f"target={limit_distance_pts:.1f}pt margine_richiesto={margin_required:.2f} EUR (dry_run={DRY_RUN})")
 
         result = session.place_order(
             instrument=name, direction=direction, size=size,
@@ -946,8 +1031,17 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
                                              skip_reason=None)
         print(f"    Posizione V6 aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
 
+        # --- Aggiorna margine_libero DENTRO lo stesso ciclo: un ordine
+        # reale appena piazzato consuma margine anche per i controlli
+        # successivi (prossimo strumento V6, poi tutto il ciclo MR) ---
+        if margine_libero is not None:
+            margine_libero -= margin_required
 
-def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: dict):
+    return margine_libero
+
+
+def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: dict,
+                                margine_libero: float | None) -> float | None:
     """Identica a detect_and_open_signals_v6 nella struttura, con due
     differenze intenzionali: segnale generate_mean_reversion_signals()
     variante RSI, e size che SALTA (non forza) sotto il minimo se la
@@ -1044,9 +1138,21 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
                       f"Comportamento intenzionale, vedi engine_mean_reversion.py.")
                 continue
 
+        # --- LIVELLO 3 (nuovo 21/07/2026): stesso controllo di V6, vedi
+        # commento li' per il dettaglio. Qui non c'e' mai "forza al minimo"
+        # da annullare (MR gia' salta sotto il minimo), solo lo skip. ---
+        margin_required = size * entry_price * inst.point_value * inst.margin_pct
+        if margine_libero is not None and margin_required > margine_libero:
+            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
+                                 skip_reason="margine_insufficiente")
+            print(f"  [MR/{name}] margine insufficiente: richiesto {margin_required:.2f} EUR, "
+                  f"libero {margine_libero:.2f} EUR — salto.")
+            continue
+
         direction = "BUY" if sig == "long" else "SELL"
         print(f"  [MR/{name}] segnale {sig.upper()} — size={size:.2f} "
-              f"stop={stop_distance_pts:.1f}pt target={limit_distance_pts:.1f}pt (dry_run={DRY_RUN})")
+              f"stop={stop_distance_pts:.1f}pt target={limit_distance_pts:.1f}pt "
+              f"margine_richiesto={margin_required:.2f} EUR (dry_run={DRY_RUN})")
 
         result = session.place_order(
             instrument=name, direction=direction, size=size,
@@ -1079,6 +1185,11 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
                                              skip_reason=None)
         print(f"    Posizione MR aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
 
+        if margine_libero is not None:
+            margine_libero -= margin_required
+
+    return margine_libero
+
 
 def main():
     if not CF_ACCOUNT_ID or not CF_API_TOKEN:
@@ -1110,11 +1221,14 @@ def main():
         print("\n--- 2c) Tetto equity reale (Livello 1, protezione accantonato) ---")
         apply_equity_cap(session, today_str)
 
+        print("\n--- 2d) Margine reale disponibile (Livello 3, nuovo 21/07/2026) ---")
+        margine_libero = compute_margin_state(session)
+
         print("\n--- 3) Rilevazione nuovi segnali V6 ---")
-        detect_and_open_signals_v6(session, today_str, hist_cache)
+        margine_libero = detect_and_open_signals_v6(session, today_str, hist_cache, margine_libero)
 
         print("\n--- 4) Rilevazione nuovi segnali mean-reversion (RSI) ---")
-        detect_and_open_signals_mr(session, today_str, hist_cache)
+        margine_libero = detect_and_open_signals_mr(session, today_str, hist_cache, margine_libero)
 
         print("\n--- 5) Log barre candidati in tracking (V6 + MR) ---")
         log_candidate_bars("v6", hist_cache, now)
