@@ -14,6 +14,10 @@ on:
         description: 'Scope: dax_2015_2016 (test ridotto) oppure full'
         required: true
         default: 'dax_2015_2016'
+      debug_keys:
+        description: 'candidate_key da tracciare in dettaglio (separati da virgola), vuoto per nessuno'
+        required: false
+        default: ''
 
 jobs:
   run-allocator:
@@ -37,4 +41,5 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TEST_SCOPE: ${{ github.event.inputs.test_scope }}
+          DEBUG_KEYS: ${{ github.event.inputs.debug_keys }}
         run: python allocator_v6.py
