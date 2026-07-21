@@ -353,7 +353,8 @@ def load_candidates_and_paths(account_id: str, token: str, scope: dict):
         f"SELECT candidate_key, instrument, direction, entry_time, atr_at_entry, adx_at_entry "
         f"FROM research_v6_candidates WHERE instrument IN ('{inst_list}') "
         f"AND entry_time >= '{scope['start']}' AND entry_time < '{scope['end']}' "
-        f"ORDER BY entry_time",
+        f"ORDER BY entry_time, "
+        f"CASE instrument WHEN 'DAX' THEN 0 WHEN 'FTSE100' THEN 1 ELSE 2 END",
         account_id, token)
 
     path_by_key: dict[str, list[dict]] = {}
@@ -442,6 +443,21 @@ def main():
             print("  ESITO: numero trade COMBACIA.")
         else:
             print(f"  ESITO: DISCREPANZA di {n_alloc - n_ref} trade — da investigare prima di procedere oltre.")
+            ref_keys_rows = d1_query(
+                f"SELECT trade_key FROM research_v6_trade_features "
+                f"WHERE instrument IN ('{inst_list}') AND entry_time >= '{scope['start']}' "
+                f"AND entry_time < '{scope['end']}'",
+                account_id, token)
+            ref_keys = {r["trade_key"] for r in ref_keys_rows}
+            alloc_keys = set(trades_df["candidate_key"]) if not trades_df.empty else set()
+            only_in_ref = sorted(ref_keys - alloc_keys)
+            only_in_alloc = sorted(alloc_keys - ref_keys)
+            print(f"\n  Presenti SOLO nel riferimento (mancano nell'allocatore): {len(only_in_ref)}")
+            for k in only_in_ref[:15]:
+                print(f"    {k}")
+            print(f"\n  Presenti SOLO nell'allocatore (in piu' rispetto al riferimento): {len(only_in_alloc)}")
+            for k in only_in_alloc[:15]:
+                print(f"    {k}")
 
     print("\n=== Completato. ===")
 
