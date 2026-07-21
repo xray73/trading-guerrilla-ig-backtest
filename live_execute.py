@@ -324,6 +324,46 @@ def compute_margin_state(session: IGSession) -> float | None:
 
 
 # =====================================================================
+# CAMPIONAMENTO SPREAD (spostato qui 21/07/2026) — riusa la sessione IG
+# gia' aperta da questo ciclo di live_execute.py, invece di un secondo
+# login separato (verify_ig_spread.py come workflow indipendente
+# causava 401 Unauthorized intermittenti quando i due cron finivano
+# per sovrapporsi/ravvicinarsi nel tempo — IG limita le sessioni
+# concorrenti per la stessa API key sul conto demo, vedi chat
+# 21/07/2026). verify_ig_spread.py/.yml restano nel repo solo per
+# campionamenti manuali occasionali — NON vanno piu' agganciati a un
+# cron separato.
+# =====================================================================
+
+_ASSUMED_SPREAD = {"DAX": 1.2, "FTSE100": 1.0}  # da engine.py, spread_fixed
+
+
+def sample_spread(session: IGSession):
+    """Campiona spread reale IG per DAX/FTSE100, stessa logica di
+    verify_ig_spread.py ma riusando la sessione gia' loggata — nessun
+    secondo login IG in questo ciclo."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for instrument in ("DAX", "FTSE100"):
+        try:
+            price = session.get_price(instrument)
+        except Exception as e:
+            print(f"  [spread] impossibile leggere il prezzo {instrument} ({e}), salto.")
+            continue
+        bid, offer = price["bid"], price["offer"]
+        if bid is None or offer is None:
+            print(f"  [spread] {instrument} bid/offer non disponibili — mercato probabilmente chiuso.")
+            continue
+        spread = offer - bid
+        assumed = _ASSUMED_SPREAD[instrument]
+        d1_query(
+            "INSERT INTO spread_samples (instrument, sample_time, bid, offer, spread, market_status) "
+            f"VALUES ('{instrument}', '{now_iso}', {bid}, {offer}, {spread}, '{price['market_status']}')"
+        )
+        print(f"  [spread] {instrument} bid={bid} offer={offer} spread_reale={spread:.2f}pt "
+              f"assunto={assumed}pt scarto={spread - assumed:+.2f}pt stato={price['market_status']}")
+
+
+# =====================================================================
 # TRACKING CANDIDATI LIVE (21/07/2026, parte 2)
 # Registra OGNI segnale valido (eseguito o no) in research_v6/mr_
 # candidates + live_v6/mr_candidates_tracking, con candidate_key nello
@@ -1223,6 +1263,9 @@ def main():
 
         print("\n--- 2d) Margine reale disponibile (Livello 3, nuovo 21/07/2026) ---")
         margine_libero = compute_margin_state(session)
+
+        print("\n--- 2e) Campionamento spread (riusa sessione, nuovo 21/07/2026) ---")
+        sample_spread(session)
 
         print("\n--- 3) Rilevazione nuovi segnali V6 ---")
         margine_libero = detect_and_open_signals_v6(session, today_str, hist_cache, margine_libero)
