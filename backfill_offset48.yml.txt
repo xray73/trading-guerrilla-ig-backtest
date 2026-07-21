@@ -1,0 +1,32 @@
+name: Backfill Offset 48 (fix max_holding V6+MR)
+
+# Fix mirato: aggiunge la barra offset=48 mancante (bug off-by-one sul
+# controllo max_holding, scoperto 21/07/2026) ai candidati V6 e MR
+# gia' estratti. Non tocca le barre 0-47 gia' scritte. Lanciare UNA
+# VOLTA per sistemare i dati esistenti, poi le estrazioni future
+# (PATH_BARS=49 nei rispettivi script) includono gia' la barra giusta.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill-offset48:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests
+
+      - name: Backfill offset 48
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python backfill_offset48.py
