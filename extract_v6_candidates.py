@@ -58,7 +58,10 @@ D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
 D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 SYMBOLS = ["DAX", "FTSE100", "GOLD"]
-PATH_BARS = 48  # fisso, come max_holding attuale — vedi decisione 21/07/2026
+PATH_BARS = 49  # FIX 21/07/2026: bars_held (= bar_index - entry_bar_index) >= max_holding_bars (48)
+                # scatta alla barra di OFFSET 48 rispetto all'entrata, non 47 — con PATH_BARS=48
+                # (offset 0-47) quella barra non veniva mai inclusa, nessun candidato poteva mai
+                # essere mascherato come "uscito per max_holding". 49 barre (offset 0-48) la include.
 
 # Copia locale degli strumenti + GOLD (stessa convenzione di
 # engine_three_asset_gold.py — mai modificare eng.INSTRUMENTS)
