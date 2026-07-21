@@ -57,6 +57,7 @@ D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
 D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 TEST_SCOPE = os.environ.get("TEST_SCOPE", "dax_2015_2016").strip().lower()
+DEBUG_KEYS = set(k.strip() for k in os.environ.get("DEBUG_KEYS", "").split(",") if k.strip())
 
 
 def d1_query(sql: str, account_id: str, token: str) -> list[dict]:
@@ -308,6 +309,13 @@ class Allocator:
 
             slots_free = self.p.max_concurrent_positions - len(self.open_positions)
             for c in candidates_here:
+                if c.candidate_key in DEBUG_KEYS:
+                    print(f"  [DEBUG] {c.candidate_key} valutato a ts={ts}: "
+                          f"slots_free={slots_free}, orders_today={self._orders_today}, "
+                          f"kill_switch_active={self._kill_switch_active}, "
+                          f"open_positions={[(p.candidate_key, p.instrument) for p in self.open_positions]}, "
+                          f"candidates_here_ordinati={[(x.candidate_key, x.instrument) for x in candidates_here]}, "
+                          f"day_start_capital={self._day_start_capital:.2f}, capital={self.capital:.2f}")
                 if slots_free <= 0 or self._orders_today >= self.p.max_new_orders_per_day:
                     break
                 inst = self.instruments[c.instrument]
