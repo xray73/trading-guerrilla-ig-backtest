@@ -56,7 +56,7 @@ import engine as eng
 D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
 D1_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
-TEST_SCOPE = os.environ.get("TEST_SCOPE", "dax_2015_2016")
+TEST_SCOPE = os.environ.get("TEST_SCOPE", "dax_2015_2016").strip().lower()
 
 
 def d1_query(sql: str, account_id: str, token: str) -> list[dict]:
