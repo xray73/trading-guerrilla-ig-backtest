@@ -24,6 +24,12 @@ Costanti già confermate nel progetto:
               della ricerca SMI, NON ancora verificata con un discover
               dedicato — controllare il conteggio/range date al primo
               caricamento prima di fidarsi ciecamente)
+  GBPUSD   -> INSTRUMENT_FX_MAJORS_GBP_USD        (aggiunta 22/07/2026 per
+              il filone "identificazione regime FTSE100" — coppia forex
+              standard, nome costante confermato via documentazione
+              ufficiale dukascopy-python, NON ancora verificata con un
+              caricamento reale — controllare conteggio/range date al
+              primo run come per ogni simbolo nuovo)
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ SYMBOL_MAP = {
     "ITALY40": "INSTRUMENT_IDX_EUROPE_ITA_IDX_EUR",
     "SMI": "INSTRUMENT_IDX_EUROPE_E_SWMI",
     "IBEX35": "INSTRUMENT_IDX_EUROPE_E_IBC_MAC",  # non ancora verificata al 100%
+    "GBPUSD": "INSTRUMENT_FX_MAJORS_GBP_USD",  # non ancora verificata al 100%
 }
 
 CHUNK_SIZE = 500
