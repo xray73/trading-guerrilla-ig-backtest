@@ -8,6 +8,21 @@ name: Load OHLC Data (generico, multi-simbolo)
 #
 # Uso: Actions -> "Run workflow" -> campo "symbols" -> es. "SMI,IBEX35"
 # (vedi SYMBOL_MAP in load_ohlc_generic.py per i simboli disponibili)
+#
+# FIX 22/07/2026: `while read -r f; do ... done < generated_sql_files.txt`
+# non eseguiva MAI il corpo del loop per l'ultima riga del file quando
+# questa non termina con newline (bug bash classico: read ritorna EOF
+# nello stesso momento in cui legge l'ultima riga, il while la scarta).
+# Scoperto con un caricamento a simbolo singolo (GBPUSD): il file
+# generated_sql_files.txt aveva una sola riga senza newline finale,
+# quindi ENTRAMBI gli step che leggono quel file (verifica + upload
+# wrangler) eseguivano zero iterazioni — nessun errore visibile, solo
+# assenza totale di output e n=0 righe scritte in D1. Probabilmente
+# presente anche nei caricamenti multi-simbolo precedenti (l'ultimo
+# simbolo della lista rischiava di essere silenziosamente saltato).
+# Fix: `while IFS= read -r f || [ -n "$f" ]; do` in entrambi gli step
+# — esegue comunque il corpo se `read` fallisce ma la variabile non è
+# vuota (cioè: ultima riga letta senza newline finale).
 on:
   workflow_dispatch:
     inputs:
@@ -45,7 +60,8 @@ jobs:
           fi
           echo "File SQL generati:"
           cat generated_sql_files.txt
-          while read -r f; do
+          echo
+          while IFS= read -r f || [ -n "$f" ]; do
             [ -z "$f" ] && continue
             echo "--- $f ---"
             wc -l "$f"
@@ -65,7 +81,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          while read -r f; do
+          while IFS= read -r f || [ -n "$f" ]; do
             [ -z "$f" ] && continue
             echo "Carico $f..."
             wrangler d1 execute trading-guerrilla-ig --remote --file="$f"
