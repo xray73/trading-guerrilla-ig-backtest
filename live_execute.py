@@ -546,7 +546,12 @@ def log_candidate_bars(strategy: str, hist_cache: dict, now: datetime):
         else:
             signals = generate_mean_reversion_signals(hist, inst, mode=MR_MODE)
 
-        match = signals[signals["timestamp"] == pd.Timestamp(target_ts, tz="UTC")]
+        target_ts_cmp = pd.Timestamp(target_ts)
+        if target_ts_cmp.tzinfo is None:
+            target_ts_cmp = target_ts_cmp.tz_localize("UTC")
+        else:
+            target_ts_cmp = target_ts_cmp.tz_convert("UTC")
+        match = signals[signals["timestamp"] == target_ts_cmp]
         if match.empty:
             continue
         bar = match.iloc[0]
