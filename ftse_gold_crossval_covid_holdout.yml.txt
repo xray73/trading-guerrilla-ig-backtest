@@ -1,0 +1,33 @@
+name: FTSE-Gold Correlation - Crossval Covid Holdout
+
+# Doppia validazione incrociata per corr_ftse_gold (unico candidato
+# sopravvissuto al controllo stride3): train esclude 2020-covid,
+# holdout SOLO 2020-covid — stesso principio già usato per il regime
+# composito ATR%+correlazione DAX-FTSE100. Prerequisito: nessuno oltre
+# ai dati DAX/FTSE100/GOLD già in D1 (non serve GBPUSD qui).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ftse-gold-crossval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui crossval holdout 2020-covid
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python ftse_gold_crossval_covid_holdout.py
