@@ -580,7 +580,19 @@ def log_candidate_bars(strategy: str, hist_cache: dict, now: datetime):
 
 
 def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> dict:
-    """Accantonamento su capitale COMBINATO (v6+mr). INVARIATO dal 19/07/2026."""
+    """Accantonamento PER POOL INDIPENDENTE (corretto 22/07/2026 — bug
+    scoperto in chat: la versione precedente consolidava su capitale
+    COMBINATO v6+mr, e siccome V6 genera quasi tutto il guadagno mentre
+    MR resta piatto, ogni consolidamento erodeva PROPORZIONALMENTE
+    anche la quota MR anche se MR non aveva contribuito nulla al
+    superamento soglia. Verificato con simulazione continua 11 anni:
+    pool MR 600EUR -> 101EUR (quasi azzerato) con la vecchia logica,
+    contro 600EUR -> 541EUR (sostanzialmente stabile) con questa
+    versione per-pool. Coerente col principio guida gia' stabilito nel
+    progetto: split capital preferito su shared/router, pool separati
+    proteggono meglio il drawdown della massimizzazione del pool
+    combinato. Ogni pool ha ora reference/threshold PROPRI — nessun
+    pool tocca mai l'altro."""
     capital_v6 = prev_state.get("capital_current_v6")
     capital_mr = prev_state.get("capital_current_mr")
     if capital_v6 is None or capital_mr is None:
@@ -588,62 +600,93 @@ def apply_monthly_consolidation_if_needed(today_str: str, prev_state: dict) -> d
         capital_v6 = legacy_capital * SPLIT_V6_PCT
         capital_mr = legacy_capital * SPLIT_MR_PCT
 
-    accantonato = prev_state.get("accantonato", 0.0) or 0.0
-    valvola_budget = prev_state.get("valvola_budget", 0.0) or 0.0
-    valvola_consumato = prev_state.get("valvola_consumato", 0.0) or 0.0
-    valvola_accantonato_rif = prev_state.get("valvola_accantonato_riferimento", 0.0) or 0.0
+    accantonato_v6 = prev_state.get("accantonato_v6", 0.0) or 0.0
+    accantonato_mr = prev_state.get("accantonato_mr", 0.0) or 0.0
+    valvola_budget_v6 = prev_state.get("valvola_budget_v6", 0.0) or 0.0
+    valvola_consumato_v6 = prev_state.get("valvola_consumato_v6", 0.0) or 0.0
+    valvola_rif_v6 = prev_state.get("valvola_accantonato_riferimento_v6", 0.0) or 0.0
+    valvola_budget_mr = prev_state.get("valvola_budget_mr", 0.0) or 0.0
+    valvola_consumato_mr = prev_state.get("valvola_consumato_mr", 0.0) or 0.0
+    valvola_rif_mr = prev_state.get("valvola_accantonato_riferimento_mr", 0.0) or 0.0
 
     if not prev_state.get("accantonamento_attivo", 1):
-        combined = capital_v6 + capital_mr
         return {
-            "capital_v6": capital_v6, "capital_mr": capital_mr, "accantonato": accantonato,
-            "reference": prev_state.get("consolidamento_reference") or combined,
-            "threshold": prev_state.get("consolidamento_threshold") or combined * THRESHOLD_MULT,
-            "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
-            "valvola_accantonato_riferimento": valvola_accantonato_rif,
+            "capital_v6": capital_v6, "capital_mr": capital_mr,
+            "accantonato_v6": accantonato_v6, "accantonato_mr": accantonato_mr,
+            "reference_v6": prev_state.get("consolidamento_reference_v6") or capital_v6,
+            "threshold_v6": prev_state.get("consolidamento_threshold_v6") or capital_v6 * THRESHOLD_MULT,
+            "reference_mr": prev_state.get("consolidamento_reference_mr") or capital_mr,
+            "threshold_mr": prev_state.get("consolidamento_threshold_mr") or capital_mr * THRESHOLD_MULT,
+            "valvola_budget_v6": valvola_budget_v6, "valvola_consumato_v6": valvola_consumato_v6,
+            "valvola_accantonato_riferimento_v6": valvola_rif_v6,
+            "valvola_budget_mr": valvola_budget_mr, "valvola_consumato_mr": valvola_consumato_mr,
+            "valvola_accantonato_riferimento_mr": valvola_rif_mr,
         }
 
-    combined = capital_v6 + capital_mr
-    reference = prev_state.get("consolidamento_reference") or combined
-    threshold = prev_state.get("consolidamento_threshold") or (reference * THRESHOLD_MULT)
+    reference_v6 = prev_state.get("consolidamento_reference_v6") or capital_v6
+    threshold_v6 = prev_state.get("consolidamento_threshold_v6") or (reference_v6 * THRESHOLD_MULT)
+    reference_mr = prev_state.get("consolidamento_reference_mr") or capital_mr
+    threshold_mr = prev_state.get("consolidamento_threshold_mr") or (reference_mr * THRESHOLD_MULT)
 
     prev_month = prev_state["trade_date"][:7]
     this_month = today_str[:7]
 
     if this_month != prev_month:
-        while combined > threshold:
-            gain = combined - reference
+        # --- V6, indipendente ---
+        while capital_v6 > threshold_v6:
+            gain = capital_v6 - reference_v6
             consolidated = CONSOLIDATE_PCT * gain
             if consolidated <= 0:
                 break
-            reduction_fraction = consolidated / combined
-            capital_v6 -= capital_v6 * reduction_fraction
-            capital_mr -= capital_mr * reduction_fraction
-            accantonato += consolidated
-            combined = capital_v6 + capital_mr
-            reference = combined
-            threshold = reference * THRESHOLD_MULT
-            print(f"[accantonamento] Consolidati {consolidated:.2f} EUR al cambio mese "
-                  f"({prev_month} -> {this_month}). Investito totale: {combined:.2f} "
-                  f"(V6={capital_v6:.2f} MR={capital_mr:.2f})  Accantonato: {accantonato:.2f}")
+            capital_v6 -= consolidated
+            accantonato_v6 += consolidated
+            reference_v6 = capital_v6
+            threshold_v6 = reference_v6 * THRESHOLD_MULT
+            print(f"[accantonamento/V6] Consolidati {consolidated:.2f} EUR al cambio mese "
+                  f"({prev_month} -> {this_month}). Investito V6: {capital_v6:.2f}  "
+                  f"Accantonato V6: {accantonato_v6:.2f}")
 
-        if accantonato > valvola_accantonato_rif:
-            vecchio_riferimento = valvola_accantonato_rif
-            valvola_budget = VALVOLA_PCT * accantonato
-            valvola_consumato = 0.0
-            valvola_accantonato_rif = accantonato
-            print(f"[valvola] Reset al cambio mese: accantonato {accantonato:.2f} > riferimento "
-                  f"precedente {vecchio_riferimento:.2f} -> nuovo budget {valvola_budget:.2f} EUR")
-        else:
-            print(f"[valvola] Nessun reset al cambio mese: accantonato {accantonato:.2f} non supera "
-                  f"il riferimento {valvola_accantonato_rif:.2f} -> budget/consumato invariati "
-                  f"({valvola_budget - valvola_consumato:.2f} EUR residui)")
+        # --- MR, indipendente ---
+        while capital_mr > threshold_mr:
+            gain = capital_mr - reference_mr
+            consolidated = CONSOLIDATE_PCT * gain
+            if consolidated <= 0:
+                break
+            capital_mr -= consolidated
+            accantonato_mr += consolidated
+            reference_mr = capital_mr
+            threshold_mr = reference_mr * THRESHOLD_MULT
+            print(f"[accantonamento/MR] Consolidati {consolidated:.2f} EUR al cambio mese "
+                  f"({prev_month} -> {this_month}). Investito MR: {capital_mr:.2f}  "
+                  f"Accantonato MR: {accantonato_mr:.2f}")
+
+        # --- valvola V6, budget dal SOLO accantonato V6 ---
+        if accantonato_v6 > valvola_rif_v6:
+            vecchio = valvola_rif_v6
+            valvola_budget_v6 = VALVOLA_PCT * accantonato_v6
+            valvola_consumato_v6 = 0.0
+            valvola_rif_v6 = accantonato_v6
+            print(f"[valvola/V6] Reset al cambio mese: accantonato V6 {accantonato_v6:.2f} > "
+                  f"riferimento precedente {vecchio:.2f} -> nuovo budget {valvola_budget_v6:.2f} EUR")
+
+        # --- valvola MR, budget dal SOLO accantonato MR ---
+        if accantonato_mr > valvola_rif_mr:
+            vecchio = valvola_rif_mr
+            valvola_budget_mr = VALVOLA_PCT * accantonato_mr
+            valvola_consumato_mr = 0.0
+            valvola_rif_mr = accantonato_mr
+            print(f"[valvola/MR] Reset al cambio mese: accantonato MR {accantonato_mr:.2f} > "
+                  f"riferimento precedente {vecchio:.2f} -> nuovo budget {valvola_budget_mr:.2f} EUR")
 
     return {
-        "capital_v6": capital_v6, "capital_mr": capital_mr, "accantonato": accantonato,
-        "reference": reference, "threshold": threshold,
-        "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
-        "valvola_accantonato_riferimento": valvola_accantonato_rif,
+        "capital_v6": capital_v6, "capital_mr": capital_mr,
+        "accantonato_v6": accantonato_v6, "accantonato_mr": accantonato_mr,
+        "reference_v6": reference_v6, "threshold_v6": threshold_v6,
+        "reference_mr": reference_mr, "threshold_mr": threshold_mr,
+        "valvola_budget_v6": valvola_budget_v6, "valvola_consumato_v6": valvola_consumato_v6,
+        "valvola_accantonato_riferimento_v6": valvola_rif_v6,
+        "valvola_budget_mr": valvola_budget_mr, "valvola_consumato_mr": valvola_consumato_mr,
+        "valvola_accantonato_riferimento_mr": valvola_rif_mr,
     }
 
 
@@ -661,46 +704,50 @@ def get_or_create_today_state(today_str: str) -> dict:
     if prev_rows:
         updated = apply_monthly_consolidation_if_needed(today_str, prev_rows[0])
         start_v6, start_mr = updated["capital_v6"], updated["capital_mr"]
-        starting_accantonato = updated["accantonato"]
-        reference, threshold = updated["reference"], updated["threshold"]
-        valvola_budget = updated["valvola_budget"]
-        valvola_consumato = updated["valvola_consumato"]
-        valvola_accantonato_rif = updated["valvola_accantonato_riferimento"]
+        acc_v6, acc_mr = updated["accantonato_v6"], updated["accantonato_mr"]
+        reference_v6, threshold_v6 = updated["reference_v6"], updated["threshold_v6"]
+        reference_mr, threshold_mr = updated["reference_mr"], updated["threshold_mr"]
+        vb_v6, vc_v6, vr_v6 = updated["valvola_budget_v6"], updated["valvola_consumato_v6"], updated["valvola_accantonato_riferimento_v6"]
+        vb_mr, vc_mr, vr_mr = updated["valvola_budget_mr"], updated["valvola_consumato_mr"], updated["valvola_accantonato_riferimento_mr"]
     else:
         start_v6 = CAPITAL0_DEFAULT * SPLIT_V6_PCT
         start_mr = CAPITAL0_DEFAULT * SPLIT_MR_PCT
-        starting_accantonato = 0.0
-        reference = CAPITAL0_DEFAULT
-        threshold = CAPITAL0_DEFAULT * THRESHOLD_MULT
-        valvola_budget = 0.0
-        valvola_consumato = 0.0
-        valvola_accantonato_rif = 0.0
+        acc_v6, acc_mr = 0.0, 0.0
+        reference_v6, threshold_v6 = start_v6, start_v6 * THRESHOLD_MULT
+        reference_mr, threshold_mr = start_mr, start_mr * THRESHOLD_MULT
+        vb_v6 = vc_v6 = vr_v6 = 0.0
+        vb_mr = vc_mr = vr_mr = 0.0
 
     combined = start_v6 + start_mr
+    accantonato_totale = acc_v6 + acc_mr
     d1_query(
         "INSERT INTO live_daily_state "
         "(trade_date, account_type, capital_start_of_day, capital_current, "
         "capital_start_of_day_v6, capital_current_v6, capital_start_of_day_mr, capital_current_mr, "
-        "accantonato, consolidamento_reference, consolidamento_threshold, accantonamento_attivo, "
-        "valvola_budget, valvola_consumato, valvola_accantonato_riferimento) "
+        "accantonato, accantonato_v6, accantonato_mr, "
+        "consolidamento_reference_v6, consolidamento_threshold_v6, "
+        "consolidamento_reference_mr, consolidamento_threshold_mr, accantonamento_attivo, "
+        "valvola_budget_v6, valvola_consumato_v6, valvola_accantonato_riferimento_v6, "
+        "valvola_budget_mr, valvola_consumato_mr, valvola_accantonato_riferimento_mr) "
         f"VALUES ('{today_str}', 'demo', {combined}, {combined}, "
         f"{start_v6}, {start_v6}, {start_mr}, {start_mr}, "
-        f"{starting_accantonato}, {reference}, {threshold}, 1, "
-        f"{valvola_budget}, {valvola_consumato}, {valvola_accantonato_rif})"
+        f"{accantonato_totale}, {acc_v6}, {acc_mr}, "
+        f"{reference_v6}, {threshold_v6}, {reference_mr}, {threshold_mr}, 1, "
+        f"{vb_v6}, {vc_v6}, {vr_v6}, {vb_mr}, {vc_mr}, {vr_mr})"
     )
     print(f"Creato nuovo record live_daily_state per {today_str}: "
-          f"V6={start_v6:.2f} EUR, MR={start_mr:.2f} EUR, accantonato={starting_accantonato:.2f} EUR, "
-          f"valvola budget/consumato={valvola_budget:.2f}/{valvola_consumato:.2f} EUR")
+          f"V6={start_v6:.2f} EUR (accantonato V6={acc_v6:.2f}), "
+          f"MR={start_mr:.2f} EUR (accantonato MR={acc_mr:.2f})")
     return {
         "trade_date": today_str, "account_type": "demo",
         "capital_current_v6": start_v6, "capital_current_mr": start_mr,
         "capital_start_of_day_v6": start_v6, "capital_start_of_day_mr": start_mr,
-        "accantonato": starting_accantonato,
+        "accantonato": accantonato_totale, "accantonato_v6": acc_v6, "accantonato_mr": acc_mr,
         "orders_today_v6": 0, "orders_today_mr": 0,
         "kill_switch_triggered_v6": 0, "kill_switch_triggered_mr": 0,
         "kill_switch_threshold_pct": -4.0,
-        "valvola_budget": valvola_budget, "valvola_consumato": valvola_consumato,
-        "valvola_accantonato_riferimento": valvola_accantonato_rif,
+        "valvola_budget_v6": vb_v6, "valvola_consumato_v6": vc_v6, "valvola_accantonato_riferimento_v6": vr_v6,
+        "valvola_budget_mr": vb_mr, "valvola_consumato_mr": vc_mr, "valvola_accantonato_riferimento_mr": vr_mr,
     }
 
 
@@ -755,25 +802,34 @@ def apply_equity_cap(session: IGSession, today_str: str) -> dict:
 
 
 def try_valvola(today_str: str, day_state: dict, risk_amount_needed_for_min: float,
-                 pool_capital: float, risk_pct: float) -> tuple[float, bool]:
-    """LIVELLO 2. INVARIATO dal 19/07/2026."""
+                 pool_capital: float, risk_pct: float, pool: str) -> tuple[float, bool]:
+    """LIVELLO 2. Corretto 22/07/2026: budget/consumato ora PER POOL
+    (colonna _v6 o _mr in base al parametro `pool`), coerente con la
+    correzione dell'accantonamento — la valvola V6 attinge solo
+    dall'accantonato V6, quella MR solo dall'accantonato MR. Prima
+    attingevano da un budget condiviso, stesso bug concettuale del
+    consolidamento (un pool poteva consumare budget generato
+    dall'altro)."""
     extra_capital_needed = risk_amount_needed_for_min / risk_pct - pool_capital
     if extra_capital_needed <= 0:
         return pool_capital, False
 
-    budget = day_state.get("valvola_budget", 0.0) or 0.0
-    consumato = day_state.get("valvola_consumato", 0.0) or 0.0
+    budget_field = f"valvola_budget_{pool}"
+    consumato_field = f"valvola_consumato_{pool}"
+
+    budget = day_state.get(budget_field, 0.0) or 0.0
+    consumato = day_state.get(consumato_field, 0.0) or 0.0
     budget_residuo = max(0.0, budget - consumato)
 
     draw = min(extra_capital_needed, budget_residuo)
     if draw > 0:
         nuovo_consumato = consumato + draw
         d1_query(
-            f"UPDATE live_daily_state SET valvola_consumato = {nuovo_consumato} "
+            f"UPDATE live_daily_state SET {consumato_field} = {nuovo_consumato} "
             f"WHERE trade_date = '{today_str}'"
         )
-        day_state["valvola_consumato"] = nuovo_consumato
-        print(f"    [valvola] prelevati {draw:.2f} EUR (budget residuo ora "
+        day_state[consumato_field] = nuovo_consumato
+        print(f"    [valvola/{pool}] prelevati {draw:.2f} EUR (budget residuo ora "
               f"{budget_residuo - draw:.2f}/{budget:.2f} EUR)")
 
     nuovo_capitale = pool_capital + draw
@@ -1016,7 +1072,7 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
         if size < inst.min_tradable_size:
             risk_amount_needed = inst.min_tradable_size * stop_distance_pts * inst.point_value
             capital, ancora_insufficiente = try_valvola(
-                today_str, day_state, risk_amount_needed, capital, inst.risk_pct)
+                today_str, day_state, risk_amount_needed, capital, inst.risk_pct, pool="v6")
             risk_amount = capital * inst.risk_pct
             size = risk_amount / (stop_distance_pts * inst.point_value)
             if ancora_insufficiente or size < inst.min_tradable_size:
@@ -1165,7 +1221,7 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
         if size < inst.min_tradable_size:
             risk_amount_needed = inst.min_tradable_size * stop_distance_pts * inst.point_value
             capital, ancora_insufficiente = try_valvola(
-                today_str, day_state, risk_amount_needed, capital, inst.risk_pct)
+                today_str, day_state, risk_amount_needed, capital, inst.risk_pct, pool="mr")
             risk_amount = capital * inst.risk_pct
             size = risk_amount / (stop_distance_pts * inst.point_value)
 
