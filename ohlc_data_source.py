@@ -15,9 +15,17 @@ fa entrambe le cose nell'ordine giusto:
 Ogni script che chiama get_ohlc(symbol, ...) è quindi sempre aggiornato
 automaticamente, senza un passo di manutenzione separato da ricordare.
 
-Simboli supportati: DAX, FTSE100, GOLD (estendibile aggiungendo a
-DUKASCOPY_CONST). Nessuna modifica a engine.py. Scrive SOLO righe nuove
-in ohlc_prices (mai UPDATE/DELETE su righe esistenti).
+Simboli supportati: DAX, FTSE100, GOLD, GBPUSD (estendibile aggiungendo
+a DUKASCOPY_CONST — NB: get_ohlc richiede che il simbolo abbia già un
+primo caricamento completo in D1 via load_ohlc_generic.py, questo
+modulo fa solo aggiornamenti incrementali). Nessuna modifica a
+engine.py. Scrive SOLO righe nuove in ohlc_prices (mai UPDATE/DELETE su
+righe esistenti).
+
+AGGIUNTA 22/07/2026: GBPUSD aggiunto per il filone "identificazione
+regime FTSE100" (correlazione FTSE-GBPUSD come candidato regime).
+Primo caricamento completo va fatto con load_ohlc_generic.py prima di
+usare get_ohlc('GBPUSD', ...) qui.
 
 FIX 20/07/2026 (parte 2 — VALIDATO IN PRODUZIONE): il primo fix ha
 funzionato (D1 ora avanza davvero, confermato da un run reale che ha
@@ -67,7 +75,7 @@ import requests
 import dukascopy_python
 from dukascopy_python.instruments import (
     INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
-    INSTRUMENT_FX_METALS_XAU_USD,
+    INSTRUMENT_FX_METALS_XAU_USD, INSTRUMENT_FX_MAJORS_GBP_USD,
 )
 
 D1_DATABASE_ID = "b9fbd4d6-7837-4d86-9c0f-ca60c0cf69e3"
@@ -84,6 +92,7 @@ DUKASCOPY_CONST = {
     "DAX": INSTRUMENT_IDX_EUROPE_E_DAAX,
     "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
     "GOLD": INSTRUMENT_FX_METALS_XAU_USD,
+    "GBPUSD": INSTRUMENT_FX_MAJORS_GBP_USD,
 }
 
 
@@ -196,7 +205,7 @@ def _read_full_from_d1(symbol: str, account_id: str, token: str) -> pd.DataFrame
 
 def get_ohlc(symbol: str, account_id: str, token: str, log=print) -> pd.DataFrame:
     """Punto d'ingresso unico: aggiorna D1 se serve, poi ritorna la
-    serie OHLC completa e aggiornata per `symbol` (DAX/FTSE100/GOLD)."""
+    serie OHLC completa e aggiornata per `symbol` (DAX/FTSE100/GOLD/GBPUSD)."""
     if symbol not in DUKASCOPY_CONST:
         raise ValueError(f"Simbolo '{symbol}' non supportato da ohlc_data_source.py "
                           f"(disponibili: {list(DUKASCOPY_CONST)})")
