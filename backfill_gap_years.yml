@@ -1,0 +1,97 @@
+name: Backfill Gap Years (ohlc_prices, cap 50k righe/run)
+
+# Riempie gli anni mancanti (2017-2019, 2021-2022) in ohlc_prices per
+# DAX/FTSE100/GOLD/GBPUSD. Decisione 22/07/2026: operazione puramente
+# additiva, nessun backtest già validato è interessato (tutti filtrano
+# per range di date esplicito dei 5 periodi ufficiali). Split su più
+# giorni con cap 50.000 righe/run per lasciare margine al limite D1
+# free tier di 100.000 righe scritte/giorno (condiviso con cron
+# live_execute ogni 30min + altre attività). Lo script si ferma PRIMA
+# di generare il file SQL se il conteggio supera 50k — nessun rischio
+# di superare la quota anche per errore di stima.
+#
+# Uso: Actions -> Run workflow -> symbol (es. DAX) + years (es. 2017,2018,2019)
+# Piano consigliato (8 run, uno al giorno):
+#   DAX 2017,2018,2019 | DAX 2021,2022
+#   FTSE100 2017,2018,2019 | FTSE100 2021,2022
+#   GOLD 2017,2018,2019 | GOLD 2021,2022
+#   GBPUSD 2017,2018,2019 | GBPUSD 2021,2022
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Simbolo (DAX, FTSE100, GOLD, GBPUSD)'
+        required: true
+        default: 'DAX'
+        type: string
+      years:
+        description: 'Anni da caricare, separati da virgola (es. 2017,2018,2019)'
+        required: true
+        default: '2017,2018,2019'
+        type: string
+
+jobs:
+  backfill-gap-years:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python pandas
+
+      - name: Scarica dati e genera file SQL (con controllo cap 50k)
+        run: python backfill_gap_years.py "${{ github.event.inputs.symbol }}" "${{ github.event.inputs.years }}"
+
+      - name: Verifica file SQL generato
+        run: |
+          if [ ! -f generated_sql_files.txt ] || [ ! -s generated_sql_files.txt ]; then
+            echo "ERRORE: nessun file SQL generato (probabilmente bloccato dal cap 50k, vedi log step precedente), interrompo."
+            exit 1
+          fi
+          f=$(cat generated_sql_files.txt)
+          echo "File SQL generato: $f"
+          wc -l "$f"
+          head -5 "$f"
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Installa wrangler
+        run: npm install -g wrangler
+
+      - name: Carica su D1 via wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          f=$(cat generated_sql_files.txt)
+          echo "Carico $f..."
+          wrangler d1 execute trading-guerrilla-ig --remote --file="$f"
+
+      - name: Verifica righe caricate per il simbolo
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler d1 execute trading-guerrilla-ig --remote \
+            --command="SELECT COUNT(*) as n, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM ohlc_prices WHERE symbol='${{ github.event.inputs.symbol }}'"
+
+      - name: Carica file SQL come artifact (per controllo manuale se serve)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-sql-${{ github.run_id }}
+          path: backfill_*.sql
+          retention-days: 7
+          if-no-files-found: warn

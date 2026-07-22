@@ -1,0 +1,37 @@
+name: Update OHLC Daily (incrementale, tutti i simboli)
+
+# Chiude il buco scoperto il 22/07/2026: nessun job esistente teneva
+# aggiornato ohlc_prices (live_execute.py scarica DAX/FTSE100 solo in
+# memoria per i segnali, senza mai scrivere qui). Trigger: cron-job.org
+# esterno via workflow_dispatch API, UNA VOLTA AL GIORNO — MAI lo
+# schedule nativo GitHub Actions (inaffidabile, stesso motivo già
+# documentato per live_execute_cron). Volume atteso per run: poche
+# centinaia di righe totali (solo le barre del giorno precedente per
+# 4 simboli) — nessun rischio di avvicinarsi al limite di scrittura
+# giornaliero D1 (100.000 righe/giorno).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  update-ohlc-daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas requests dukascopy-python
+
+      - name: Aggiorna ohlc_prices per tutti i simboli
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python update_ohlc_daily.py
