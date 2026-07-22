@@ -1,0 +1,37 @@
+name: FTSE-Gold Correlation - Crossval Generic Holdout
+
+# Versione generalizzata di ftse_gold_crossval_covid_holdout.yml:
+# scegli il periodo holdout da riga di comando (utile per aumentare n
+# sullo stato "media", che con holdout 2020-covid aveva solo n=11-13).
+
+on:
+  workflow_dispatch:
+    inputs:
+      holdout_period:
+        description: 'Periodo da usare come holdout (es. 2015-2016, 2020-covid, 2023, 2026-ytd)'
+        required: true
+        default: '2015-2016'
+        type: string
+
+jobs:
+  ftse-gold-crossval-generic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui crossval con holdout scelto
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python ftse_gold_crossval_generic.py "${{ github.event.inputs.holdout_period }}"
