@@ -1,0 +1,32 @@
+name: FTSE Regime Candidates - Persistence Check (3 candidati in parallelo)
+
+# Prerequisito: GBPUSD deve già avere un primo caricamento completo in
+# D1 (workflow "Load OHLC Data (generico, multi-simbolo)" con campo
+# symbols=GBPUSD) prima di eseguire questo workflow — altrimenti
+# get_ohlc('GBPUSD', ...) solleva RuntimeError (nessun dato di partenza).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ftse-regime-persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui test di persistenza sui 3 candidati
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python ftse_regime_candidates_persistence.py
