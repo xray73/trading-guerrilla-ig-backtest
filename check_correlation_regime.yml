@@ -1,0 +1,27 @@
+name: Check Correlation Regime (griglia finestre DAX-FTSE100)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check-correlation-regime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui test correlazione regime
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python check_correlation_regime.py
