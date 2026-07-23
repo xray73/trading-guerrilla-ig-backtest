@@ -301,6 +301,9 @@ def bootstrap_periods(signals, period_labels):
 
         n_dynamic_exit = int((dyn_trades["exit_reason"] == "dynamic_exit_negative").sum()) if len(dyn_trades) else 0
 
+        baseline_exit_counts = baseline_trades["exit_reason"].value_counts().to_dict() if len(baseline_trades) else {}
+        dyn_exit_counts = dyn_trades["exit_reason"].value_counts().to_dict() if len(dyn_trades) else {}
+
         per_instrument = {}
         for inst_name in ("DAX", "FTSE100"):
             b_inst = baseline_trades[baseline_trades["instrument"] == inst_name] if len(baseline_trades) else baseline_trades
@@ -308,9 +311,12 @@ def bootstrap_periods(signals, period_labels):
             b_pnl_inst = float(b_inst["pnl"].sum()) if len(b_inst) else 0.0
             d_pnl_inst = float(d_inst["pnl"].sum()) if len(d_inst) else 0.0
             n_exit_inst = int((d_inst["exit_reason"] == "dynamic_exit_negative").sum()) if len(d_inst) else 0
+            b_exit_inst = b_inst["exit_reason"].value_counts().to_dict() if len(b_inst) else {}
+            d_exit_inst = d_inst["exit_reason"].value_counts().to_dict() if len(d_inst) else {}
             per_instrument[inst_name] = {
                 "delta": d_pnl_inst - b_pnl_inst, "n_dynamic_exit": n_exit_inst,
                 "baseline_trades": len(b_inst), "dyn_trades": len(d_inst),
+                "baseline_exit_counts": b_exit_inst, "dyn_exit_counts": d_exit_inst,
             }
 
         period_summary.append({
@@ -318,6 +324,7 @@ def bootstrap_periods(signals, period_labels):
             "delta": dyn_pnl - baseline_pnl,
             "baseline_trades": len(baseline_trades), "dyn_trades": len(dyn_trades),
             "n_dynamic_exit_negativo": n_dynamic_exit,
+            "baseline_exit_counts": baseline_exit_counts, "dyn_exit_counts": dyn_exit_counts,
             "per_instrument": per_instrument,
         })
 
@@ -349,10 +356,14 @@ def print_result(label, res):
               f"(uscite negative anticipate={s['n_dynamic_exit_negativo']:>3})  "
               f"PnL base={s['baseline_pnl']:>10.2f}  PnL dyn={s['dyn_pnl']:>10.2f}  "
               f"delta={s['delta']:>+9.2f}")
+        print(f"      exit_reason baseline: {s['baseline_exit_counts']}")
+        print(f"      exit_reason dinamico: {s['dyn_exit_counts']}")
         for inst_name, pi in s["per_instrument"].items():
             print(f"      {inst_name:<8} delta={pi['delta']:>+9.2f}  "
                   f"uscite anticipate={pi['n_dynamic_exit']:>3}  "
                   f"trade base={pi['baseline_trades']:>4} dyn={pi['dyn_trades']:>4}")
+            print(f"          exit_reason base: {pi['baseline_exit_counts']}")
+            print(f"          exit_reason dyn:  {pi['dyn_exit_counts']}")
     print(f"\n  Delta osservato: {res['observed_delta']:+.2f} EUR")
     print(f"  Z-score: {res['z_score']:.3f}")
     print(f"  %% iterazioni con delta<=0: {res['pct_leq_zero']:.1f}%%")
