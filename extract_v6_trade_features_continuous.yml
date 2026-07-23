@@ -1,0 +1,31 @@
+name: Extract V6 Trade Features - Continuous Dataset (tabelle separate)
+
+# Estende extract_v6_trade_features.py al dataset OHLC continuo, SENZA
+# toccare research_v6_trade_features/_path ufficiali (2156 trade, 5
+# periodi) — scrive in tabelle nuove _continuous, additive.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  extract-v6-features-continuous:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui estrazione su dataset continuo
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python extract_v6_trade_features_continuous.py
