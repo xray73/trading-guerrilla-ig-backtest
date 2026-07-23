@@ -1,28 +1,31 @@
 """
-test_ftse_dynamic_exit_combined.py — v3: sostituisce avg_slope (media
-cumulata da inizio trade, dimostrata troppo lenta a reagire) con
-slope_locale (pendenza sulle ultime 2 barre), mantenendo confronto
-RELATIVO contro early_slope e conferma a CONFIRM_BARS=2 barre
-consecutive introdotta in v2.
+test_ftse_dynamic_exit_combined.py — v4: aggiunge BLOCCO RIENTRO
+(cooldown_bars=4) sullo stesso strumento+direzione dopo una chiusura
+Ramo A, oltre a slope_locale (v3) e conferma 2 barre (v2).
 
-MOTIVAZIONE DEL CAMBIO v2->v3 (analisi su research_v6_trade_path_continuous,
-23/07/2026, dopo il risultato ancora negativo di v2, z=-3.15 aggregato):
-  - avg_slope = (adx_ora - adx_entrata)/barre_trascorse dilata sempre di
-    più la finestra di calcolo man mano che il trade invecchia — ogni
-    nuova barra pesa meno, quindi la metrica reagisce lentamente a un
-    vero cambio di passo recente
-  - slope_locale = (adx_ora - adx_2_barre_fa)/2, confrontata comunque in
-    modo RELATIVO contro early_slope (non contro zero in assoluto, che
-    si è verificato peggiore), cattura il 45% in più di perdenti veri a
-    parità di falsi allarmi sui vincenti (recall 18,8% vs 13,0%,
-    selettività quasi identica 2,54:1 vs 2,6:1) — verificato con query
-    dedicata prima di ricostruire il test causale.
+MOTIVAZIONE v3->v4 (23/07/2026): simulazione offline sui path già
+avvenuti (validate_dynamic_exit_logic_offline.py, che NON cattura
+l'effetto a cascata di portafoglio) stima un delta quasi neutro
+(+103R) sugli STESSI trade del baseline — ma il motore vero (che
+INCLUDE l'effetto a cascata) dà -10.787EUR, fortemente negativo. Il
+divario tra i due punta al rientro a cascata (slot liberato da una
+chiusura anticipata che fa scattare subito un trade NUOVO sullo
+stesso setup, spesso a condizioni piu' rischiose) come causa dominante
+del danno, non i trade gia' esistenti nel baseline. Il blocco rientro
+era gia' stato proposto in sessione ma mai testato — questo e' il test.
+
+Il cooldown copre ENTRAMBI i rami, non solo il Ramo A: se il Ramo B ha
+gia' bloccato lo stop di un trade e quello stop (non l'originale a
+-1R) viene poi toccato, la chiusura e' comunque causata dalla nostra
+regola — libera uno slot con lo stesso rischio di rientro a cascata,
+quindi merita lo stesso cooldown.
 
 Storia dei tentativi precedenti su questa famiglia (tutti con motore
 vero + bootstrap):
   v1 (trigger singolo, avg_slope): z=-3.28 aggregato, z=-1.90 holdout
   v2 (conferma 2 barre, avg_slope): z=-3.15 aggregato, z=-1.35 holdout
-  v3 (conferma 2 barre, slope_locale): QUESTO TEST
+  v3 (conferma 2 barre, slope_locale): z=-3.22 aggregato, z=-1.95 holdout
+  v4 (v3 + blocco rientro 4 barre): QUESTO TEST
 
 Regola unificata per DAX+FTSE100 NELLO STESSO RUN (non due run
 separati) — condividono tetto posizioni e kill switch, un run a
@@ -41,17 +44,21 @@ aperta):
 
   Se decelerazione E R_corrente <= NEG_THRESHOLD per CONFIRM_BARS barre
   consecutive:
-      RAMO A -> chiusura immediata a mercato
+      RAMO A -> chiusura immediata a mercato, registra (strumento,
+                direzione) in cooldown per COOLDOWN_BARS barre
   Se decelerazione E R_corrente >= POS_THRESHOLD per CONFIRM_BARS barre
   consecutive:
       RAMO B -> stop dinamico bloccato a LOCK_FRACTION * R_corrente
                 (si muove SOLO a favore, mai indietro)
+  Un nuovo segnale sullo stesso strumento+direzione entro
+  COOLDOWN_BARS da una chiusura Ramo A viene SCARTATO (non aperto).
   Il contatore consecutivo si azzera se la condizione smette di essere
   vera anche per una sola barra (nessun reset "a rimbalzo" — verificato
   non discriminante).
   Altrimenti: nessuna modifica, stop/target originali intatti.
 
 PARAMETRI FISSATI ORA, PRIMA DI VEDERE RISULTATI:
+  COOLDOWN_BARS = 4      (barre di blocco rientro dopo Ramo A)
   NEG_THRESHOLD = -0.2   (coerente con l'analisi a barra 4)
   POS_THRESHOLD = +0.3   (coerente con l'analisi giveback originale)
   LOCK_FRACTION = 0.5    (blocca il 50% del guadagno corrente)
@@ -94,6 +101,7 @@ LOCK_FRACTION = 0.5
 DECEL_RATIO = 0.3
 MIN_BARS_EARLY = 3
 CONFIRM_BARS = 2  # barre consecutive richieste prima di agire (Ramo A e Ramo B)
+COOLDOWN_BARS = 4  # barre di blocco rientro sullo stesso strumento+direzione dopo Ramo A
 
 PERIODS = {
     "2015-2016": ("2015-01-01", "2016-12-31"),
@@ -119,9 +127,11 @@ def slope_ols(xs, ys):
 
 class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
 
-    def __init__(self, capital0, force_neutral: bool = False, **kwargs):
+    def __init__(self, capital0, force_neutral: bool = False, cooldown_bars: int = 4, **kwargs):
         super().__init__(capital0, **kwargs)
         self.force_neutral = force_neutral
+        self.cooldown_bars = cooldown_bars
+        self.last_dynamic_exit_bar = {}  # (instrument, direction) -> bar_index dell'uscita Ramo A
 
     def _open_position(self, instrument, direction, bar, atr_at_entry, adx_at_entry):
         super()._open_position(instrument, direction, bar, atr_at_entry, adx_at_entry)
@@ -187,6 +197,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         if pos.neg_streak >= CONFIRM_BARS:
             spread = inst.spread_fixed
             exit_price = close_price - spread / 2 if pos.direction == "long" else close_price + spread / 2
+            self.last_dynamic_exit_bar[(pos.instrument, pos.direction)] = pos.entry_bar_index + bar_offset
             self._close_position(pos, bar["timestamp"], exit_price, "dynamic_exit_negative")
             return True
 
@@ -233,7 +244,16 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                     if closed_here:
                         continue
 
+                was_locked = getattr(pos, "locked_r", None) is not None
+                pos_instrument, pos_direction = pos.instrument, pos.direction
                 self._try_close_position(pos, bar, bar_index, inst)
+                still_open = any(p is pos for p in self.open_positions)
+                if was_locked and not self.force_neutral and not still_open:
+                    # la posizione e' stata chiusa mentre il Ramo B aveva
+                    # gia' bloccato lo stop — la chiusura e' causata dalla
+                    # nostra regola, non dallo stop originale a -1R, quindi
+                    # merita lo stesso cooldown anti-rientro del Ramo A
+                    self.last_dynamic_exit_bar[(pos_instrument, pos_direction)] = bar_index
 
             self.equity_curve.append((ts, self.capital))
 
@@ -271,6 +291,16 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                 already_open = any(p.instrument == name for p in self.open_positions)
                 if already_open:
                     continue
+
+                # Blocco rientro: stesso strumento+direzione chiuso via
+                # Ramo A entro cooldown_bars — evita il "rientro a cascata"
+                # (slot liberato che riapre subito lo stesso setup fallito,
+                # spesso a condizioni piu' rischiose) scoperto 23/07/2026.
+                if not self.force_neutral:
+                    last_exit = self.last_dynamic_exit_bar.get((name, prev_bar["signal"]))
+                    if last_exit is not None and (i - last_exit) < self.cooldown_bars:
+                        continue
+
                 candidates.append({
                     "instrument": name, "direction": prev_bar["signal"],
                     "bar": cur_bar, "atr": prev_bar["atr"], "adx": prev_bar["adx"],
@@ -314,7 +344,8 @@ def run_period_baseline(signals_by_instrument, start, end):
 
 def run_period_dynamic(signals_by_instrument, start, end, force_neutral=False):
     sliced = {name: slice_period(sig, start, end) for name, sig in signals_by_instrument.items()}
-    engine_ = BacktestEngineDynamicExitCombined(capital0=CAPITAL_V6, force_neutral=force_neutral)
+    engine_ = BacktestEngineDynamicExitCombined(capital0=CAPITAL_V6, force_neutral=force_neutral,
+                                                 cooldown_bars=COOLDOWN_BARS)
     trades_df, _ = engine_.run(sliced)
     return trades_df
 
@@ -448,7 +479,7 @@ def main():
     print("Genero segnali V6...")
     signals = {name: eng.generate_signals(hist[name], eng.INSTRUMENTS[name]) for name in hist}
 
-    print(f"\nv3 — slope_locale (2 barre) invece di avg_slope cumulato. Parametri: "
+    print(f"\nv4 — slope_locale + blocco rientro (cooldown={COOLDOWN_BARS} barre). Parametri: "
           f"NEG_THRESHOLD={NEG_THRESHOLD}, POS_THRESHOLD={POS_THRESHOLD}, "
           f"LOCK_FRACTION={LOCK_FRACTION}, DECEL_RATIO={DECEL_RATIO}, CONFIRM_BARS={CONFIRM_BARS}\n")
 
