@@ -132,6 +132,18 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         self.force_neutral = force_neutral
         self.cooldown_bars = cooldown_bars
         self.last_dynamic_exit_bar = {}  # (instrument, direction) -> bar_index dell'uscita Ramo A
+        # Diagnostica: al momento di ogni uscita anticipata (Ramo A o stop
+        # bloccato dal Ramo B), il tetto ordini giornaliero era già saturo
+        # (cascata bloccata quel giorno) o c'era ancora margine (cascata
+        # possibile)?
+        self.n_exit_cap_saturo = 0
+        self.n_exit_cap_disponibile = 0
+
+    def _registra_diagnostica_cascata(self):
+        if self._orders_today >= self.p.max_new_orders_per_day:
+            self.n_exit_cap_saturo += 1
+        else:
+            self.n_exit_cap_disponibile += 1
 
     def _open_position(self, instrument, direction, bar, atr_at_entry, adx_at_entry):
         super()._open_position(instrument, direction, bar, atr_at_entry, adx_at_entry)
@@ -198,6 +210,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
             spread = inst.spread_fixed
             exit_price = close_price - spread / 2 if pos.direction == "long" else close_price + spread / 2
             self.last_dynamic_exit_bar[(pos.instrument, pos.direction)] = pos.entry_bar_index + bar_offset
+            self._registra_diagnostica_cascata()
             self._close_position(pos, bar["timestamp"], exit_price, "dynamic_exit_negative")
             return True
 
@@ -254,6 +267,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                     # nostra regola, non dallo stop originale a -1R, quindi
                     # merita lo stesso cooldown anti-rientro del Ramo A
                     self.last_dynamic_exit_bar[(pos_instrument, pos_direction)] = bar_index
+                    self._registra_diagnostica_cascata()
 
             self.equity_curve.append((ts, self.capital))
 
@@ -347,7 +361,7 @@ def run_period_dynamic(signals_by_instrument, start, end, force_neutral=False):
     engine_ = BacktestEngineDynamicExitCombined(capital0=CAPITAL_V6, force_neutral=force_neutral,
                                                  cooldown_bars=COOLDOWN_BARS)
     trades_df, _ = engine_.run(sliced)
-    return trades_df
+    return trades_df, engine_
 
 
 def daily_pnl(trades_df, start, end):
@@ -366,7 +380,7 @@ def bootstrap_periods(signals, period_labels):
     for period_name in period_labels:
         start, end = PERIODS[period_name]
         baseline_trades = run_period_baseline(signals, start, end)
-        dyn_trades = run_period_dynamic(signals, start, end)
+        dyn_trades, dyn_engine = run_period_dynamic(signals, start, end)
 
         baseline_pnl = float(baseline_trades["pnl"].sum()) if len(baseline_trades) else 0.0
         dyn_pnl = float(dyn_trades["pnl"].sum()) if len(dyn_trades) else 0.0
@@ -402,6 +416,8 @@ def bootstrap_periods(signals, period_labels):
             "n_dynamic_exit_negativo": n_dynamic_exit,
             "baseline_exit_counts": baseline_exit_counts, "dyn_exit_counts": dyn_exit_counts,
             "per_instrument": per_instrument,
+            "n_exit_cap_saturo": dyn_engine.n_exit_cap_saturo,
+            "n_exit_cap_disponibile": dyn_engine.n_exit_cap_disponibile,
         })
 
     combined_deltas = pd.concat(all_delta_days).values
@@ -434,6 +450,11 @@ def print_result(label, res):
               f"delta={s['delta']:>+9.2f}")
         print(f"      exit_reason baseline: {s['baseline_exit_counts']}")
         print(f"      exit_reason dinamico: {s['dyn_exit_counts']}")
+        n_cap_tot = s['n_exit_cap_saturo'] + s['n_exit_cap_disponibile']
+        pct_saturo = 100 * s['n_exit_cap_saturo'] / n_cap_tot if n_cap_tot else 0
+        print(f"      Diagnostica cascata: {s['n_exit_cap_saturo']} uscite con tetto ordini GIA' SATURO "
+              f"({pct_saturo:.0f}%, cascata bloccata) | {s['n_exit_cap_disponibile']} con margine "
+              f"residuo ({100-pct_saturo:.0f}%, cascata possibile)")
         for inst_name, pi in s["per_instrument"].items():
             print(f"      {inst_name:<8} delta={pi['delta']:>+9.2f}  "
                   f"uscite anticipate={pi['n_dynamic_exit']:>3}  "
@@ -450,7 +471,7 @@ def sanity_check(signals):
     print("=== SANITY CHECK (obbligatorio) ===")
     start, end = PERIODS["2015-2016"]
     baseline = run_period_baseline(signals, start, end)
-    neutral = run_period_dynamic(signals, start, end, force_neutral=True)
+    neutral, _ = run_period_dynamic(signals, start, end, force_neutral=True)
     n_base, n_neutral = len(baseline), len(neutral)
     pnl_base = float(baseline["pnl"].sum()) if n_base else 0.0
     pnl_neutral = float(neutral["pnl"].sum()) if n_neutral else 0.0
