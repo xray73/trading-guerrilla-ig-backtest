@@ -14,22 +14,20 @@ errore esplicito, come quasi successo con la prima ricerca SMI che ha
 trovato solo azioni singole). Per aggiungere un nuovo simbolo:
   1. Eseguire discover_dukascopy_*.py per trovare/confermare la costante
   2. Aggiungere una riga a SYMBOL_MAP qui sotto
-  3. Da quel momento il simbolo è disponibile per qualunque run futura,
+  3. Da quel momento il simbolo e' disponibile per qualunque run futura,
      nessun nuovo script da scrivere.
 
-Costanti già confermate nel progetto:
-  ITALY40  -> INSTRUMENT_IDX_EUROPE_ITA_IDX_EUR  (confermata, discover 14/07)
-  SMI      -> INSTRUMENT_IDX_EUROPE_E_SWMI        (confermata, discover 15/07)
-  IBEX35   -> INSTRUMENT_IDX_EUROPE_E_IBC_MAC     (trovata come sottoprodotto
-              della ricerca SMI, NON ancora verificata con un discover
-              dedicato — controllare il conteggio/range date al primo
-              caricamento prima di fidarsi ciecamente)
-  GBPUSD   -> INSTRUMENT_FX_MAJORS_GBP_USD        (aggiunta 22/07/2026 per
-              il filone "identificazione regime FTSE100" — coppia forex
-              standard, nome costante confermato via documentazione
-              ufficiale dukascopy-python, NON ancora verificata con un
-              caricamento reale — controllare conteggio/range date al
-              primo run come per ogni simbolo nuovo)
+AGGIORNAMENTO 23/07/2026: rimossi ITALY40 e IBEX35 da SYMBOL_MAP — dati
+corrispondenti eliminati da ohlc_prices in D1 (32.909 righe ITALY40,
+IBEX35 non aveva mai avuto dati caricati nonostante fosse mappato).
+Decisione: questi due simboli non verranno piu' utilizzati nel
+progetto.
+
+Costanti confermate nel progetto (tutte verificate via discover script):
+  GBPUSD   -> INSTRUMENT_FX_MAJORS_GBP_USD  (confermata 23/07/2026 via
+              discover_dukascopy_eurusd.py, verifica incrociata)
+  EURUSD   -> INSTRUMENT_FX_MAJORS_EUR_USD  (confermata 23/07/2026 via
+              discover_dukascopy_eurusd.py)
 """
 
 from __future__ import annotations
@@ -41,10 +39,8 @@ import dukascopy_python
 import dukascopy_python.instruments as instr
 
 SYMBOL_MAP = {
-    "ITALY40": "INSTRUMENT_IDX_EUROPE_ITA_IDX_EUR",
-    "SMI": "INSTRUMENT_IDX_EUROPE_E_SWMI",
-    "IBEX35": "INSTRUMENT_IDX_EUROPE_E_IBC_MAC",  # non ancora verificata al 100%
-    "GBPUSD": "INSTRUMENT_FX_MAJORS_GBP_USD",  # non ancora verificata al 100%
+    "GBPUSD": "INSTRUMENT_FX_MAJORS_GBP_USD",
+    "EURUSD": "INSTRUMENT_FX_MAJORS_EUR_USD",
 }
 
 CHUNK_SIZE = 500
@@ -145,7 +141,6 @@ def main():
         if filename:
             generated_files.append(filename)
 
-    # elenco per lo step successivo del workflow (uno per riga, letto da bash)
     with open("generated_sql_files.txt", "w") as f:
         f.write("\n".join(generated_files))
 
