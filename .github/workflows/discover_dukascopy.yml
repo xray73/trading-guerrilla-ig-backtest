@@ -1,0 +1,46 @@
+name: Discover Dukascopy Instrument Constant
+
+# Esegue uno script discover_dukascopy_*.py senza scaricare dati e
+# senza toccare D1 — solo enumerazione delle costanti disponibili nel
+# pacchetto dukascopy-python, per confermare il nome esatto prima di
+# aggiungere un nuovo simbolo a SYMBOL_MAP in load_ohlc_generic.py.
+#
+# Uso: Actions -> "Run workflow" -> campo "script" -> es.
+# "discover_dukascopy_eurusd.py" (deve essere gia' presente nella repo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: 'Nome dello script discover da eseguire (deve esistere nella repo)'
+        required: true
+        default: 'discover_dukascopy_eurusd.py'
+        type: string
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dukascopy-python
+        run: pip install dukascopy-python
+
+      - name: Verifica esistenza dello script richiesto
+        run: |
+          if [ ! -f "${{ github.event.inputs.script }}" ]; then
+            echo "ERRORE: file ${{ github.event.inputs.script }} non trovato nella repo."
+            echo "Carica prima lo script discover_dukascopy_*.py, poi rilancia."
+            exit 1
+          fi
+
+      - name: Esegui script discover
+        run: python "${{ github.event.inputs.script }}"
