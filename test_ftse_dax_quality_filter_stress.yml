@@ -1,0 +1,33 @@
+name: Test Quality Filter Stress (DAX+FTSE100, idea 2 - holdout dal via)
+
+on:
+  workflow_dispatch:
+    inputs:
+      holdout_period:
+        description: 'Periodo da usare come holdout (2015-2016, 2020-covid, 2023, 2024-2025, 2026-ytd)'
+        required: true
+        default: '2020-covid'
+        type: string
+
+jobs:
+  test-quality-filter-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui test causale + bootstrap (holdout dal via)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python test_ftse_dax_quality_filter_stress.py "${{ github.event.inputs.holdout_period }}"
