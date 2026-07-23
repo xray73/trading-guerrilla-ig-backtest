@@ -1,20 +1,28 @@
 """
-test_ftse_dynamic_exit_combined.py — v2: aggiunge CONFERMA A BARRE
-CONSECUTIVE (CONFIRM_BARS=2) prima di agire, sia su Ramo A che Ramo B.
+test_ftse_dynamic_exit_combined.py — v3: sostituisce avg_slope (media
+cumulata da inizio trade, dimostrata troppo lenta a reagire) con
+slope_locale (pendenza sulle ultime 2 barre), mantenendo confronto
+RELATIVO contro early_slope e conferma a CONFIRM_BARS=2 barre
+consecutive introdotta in v2.
 
-MOTIVAZIONE DEL CAMBIO (analisi su research_v6_trade_path_continuous,
-23/07/2026, dopo il fallimento della v1 a trigger singolo, z=-3.28):
-  - Ramo B (trigger singolo): 65,4% dei trade toccati erano falsi
-    allarmi — il prezzo non scendeva mai al livello bloccato in seguito
-  - Ramo A (trigger singolo): colpiva il 13,8% dei vincenti durante il
-    loro normale tuffo iniziale (irreversibile, uscita a mercato)
-  - Un reset "se R risale sopra soglia" NON funziona come filtro: quasi
-    tutti i trade rimbalzano prima o poi (100% dei "necessari", 99,4%
-    dei "non necessari") — non discrimina, vanificherebbe la regola
-  - La correzione scelta: richiedere che la condizione sia vera per
-    CONFIRM_BARS barre CONSECUTIVE (non un singolo tocco) prima di
-    agire — riduce i falsi positivi da rumore di singola barra senza
-    fare affidamento su un reset che non discrimina.
+MOTIVAZIONE DEL CAMBIO v2->v3 (analisi su research_v6_trade_path_continuous,
+23/07/2026, dopo il risultato ancora negativo di v2, z=-3.15 aggregato):
+  - avg_slope = (adx_ora - adx_entrata)/barre_trascorse dilata sempre di
+    più la finestra di calcolo man mano che il trade invecchia — ogni
+    nuova barra pesa meno, quindi la metrica reagisce lentamente a un
+    vero cambio di passo recente
+  - slope_locale = (adx_ora - adx_2_barre_fa)/2, confrontata comunque in
+    modo RELATIVO contro early_slope (non contro zero in assoluto, che
+    si è verificato peggiore), cattura il 45% in più di perdenti veri a
+    parità di falsi allarmi sui vincenti (recall 18,8% vs 13,0%,
+    selettività quasi identica 2,54:1 vs 2,6:1) — verificato con query
+    dedicata prima di ricostruire il test causale.
+
+Storia dei tentativi precedenti su questa famiglia (tutti con motore
+vero + bootstrap):
+  v1 (trigger singolo, avg_slope): z=-3.28 aggregato, z=-1.90 holdout
+  v2 (conferma 2 barre, avg_slope): z=-3.15 aggregato, z=-1.35 holdout
+  v3 (conferma 2 barre, slope_locale): QUESTO TEST
 
 Regola unificata per DAX+FTSE100 NELLO STESSO RUN (non due run
 separati) — condividono tetto posizioni e kill switch, un run a
@@ -27,9 +35,9 @@ vedi sessione). Conteggio uscite riportato per strumento separatamente.
 
 REGOLA (controllata OGNI barra da bar_offset>=3, mentre la posizione è
 aperta):
-  early_slope = pendenza ADX barre 0-2 (calcolata una volta, congelata)
-  avg_slope   = (adx_corrente - adx_entrata) / bar_offset
-  decelerazione = avg_slope < early_slope * DECEL_RATIO
+  early_slope   = pendenza ADX barre 0-2 (calcolata una volta, congelata)
+  slope_locale  = (adx_ora - adx_2_barre_fa) / 2
+  decelerazione = slope_locale < early_slope * DECEL_RATIO
 
   Se decelerazione E R_corrente <= NEG_THRESHOLD per CONFIRM_BARS barre
   consecutive:
@@ -137,8 +145,17 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         if bar_offset < MIN_BARS_EARLY or pos.early_slope is None or pos.early_slope == 0:
             return False
 
-        avg_slope = (pos.adx_history[-1] - pos.adx_history[0]) / bar_offset
-        is_decel = avg_slope < pos.early_slope * DECEL_RATIO
+        # slope_locale invece di avg_slope: pendenza sulle ultime 2 barre
+        # (non media cumulata da inizio trade) — verificato con analisi
+        # su research_v6_trade_path_continuous che cattura il 45% in più
+        # di perdenti veri a parità di falsi allarmi sui vincenti (18,8%
+        # vs 13,0% recall, rapporto selettività quasi identico 2,54:1 vs
+        # 2,6:1). avg_slope cumulato diluisce troppo lentamente lo scatto
+        # iniziale, slope_locale reagisce al cambio di passo recente.
+        if len(pos.adx_history) < 3:
+            return False
+        slope_locale = (pos.adx_history[-1] - pos.adx_history[-3]) / 2.0
+        is_decel = slope_locale < pos.early_slope * DECEL_RATIO
         if not is_decel:
             pos.neg_streak = 0
             pos.pos_streak = 0
@@ -431,9 +448,9 @@ def main():
     print("Genero segnali V6...")
     signals = {name: eng.generate_signals(hist[name], eng.INSTRUMENTS[name]) for name in hist}
 
-    print(f"\nParametri (fissati prima dei risultati): NEG_THRESHOLD={NEG_THRESHOLD}, "
-          f"POS_THRESHOLD={POS_THRESHOLD}, LOCK_FRACTION={LOCK_FRACTION}, DECEL_RATIO={DECEL_RATIO}, "
-          f"CONFIRM_BARS={CONFIRM_BARS}\n")
+    print(f"\nv3 — slope_locale (2 barre) invece di avg_slope cumulato. Parametri: "
+          f"NEG_THRESHOLD={NEG_THRESHOLD}, POS_THRESHOLD={POS_THRESHOLD}, "
+          f"LOCK_FRACTION={LOCK_FRACTION}, DECEL_RATIO={DECEL_RATIO}, CONFIRM_BARS={CONFIRM_BARS}\n")
 
     sanity_check(signals)
 
