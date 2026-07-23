@@ -18,19 +18,23 @@ reinserire (idempotente su riesecuzione, ma non cancella mai gli altri
 anni già presenti per lo stesso simbolo).
 
 LIMITE DI SICUREZZA: D1 free tier consente 100.000 righe scritte/giorno
-(fonte: Cloudflare D1 FAQ, verificato 22/07/2026 — la cifra "5M" nei
-appunti precedenti si riferiva a righe LETTE/giorno, non scritte, ed è
-stata corretta). Su richiesta esplicita, questo script si ferma con
-errore PRIMA di generare il file SQL se il conteggio totale supera
-MAX_ROWS_PER_RUN=50.000 — lascia margine per cron live_execute (ogni
-30min) e altre attività giornaliere che scrivono su D1 lo stesso giorno.
+(fonte: Cloudflare D1 FAQ, verificato 22/07/2026). Su richiesta
+esplicita, questo script si ferma con errore PRIMA di generare il file
+SQL se il conteggio totale supera MAX_ROWS_PER_RUN=50.000 — lascia
+margine per cron live_execute (ogni 30min) e altre attività giornaliere
+che scrivono su D1 lo stesso giorno.
+
+AGGIORNAMENTO 23/07/2026: aggiunto EURUSD a SYMBOL_MAP (costante
+INSTRUMENT_FX_MAJORS_EUR_USD, confermata via discover_dukascopy_eurusd.py
+il 23/07/2026) — serve a colmare i 5 anni mancanti (2017-2019, 2021-2022)
+dal backfill iniziale, che aveva coperto solo i 5 periodi ufficiali
+(81.442 righe, verificato in D1 il 23/07/2026).
 
 Uso:
   python backfill_gap_years.py DAX 2017,2018,2019
   python backfill_gap_years.py GOLD 2021,2022
-
-Costanti Dukascopy riusate da ohlc_data_source.py / load_ohlc_generic.py
-(già confermate in produzione per questi 4 simboli).
+  python backfill_gap_years.py EURUSD 2017,2018,2019
+  python backfill_gap_years.py EURUSD 2021,2022
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ import dukascopy_python
 from dukascopy_python.instruments import (
     INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
     INSTRUMENT_FX_METALS_XAU_USD, INSTRUMENT_FX_MAJORS_GBP_USD,
+    INSTRUMENT_FX_MAJORS_EUR_USD,
 )
 
 SYMBOL_MAP = {
@@ -49,6 +54,7 @@ SYMBOL_MAP = {
     "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
     "GOLD": INSTRUMENT_FX_METALS_XAU_USD,
     "GBPUSD": INSTRUMENT_FX_MAJORS_GBP_USD,
+    "EURUSD": INSTRUMENT_FX_MAJORS_EUR_USD,
 }
 
 MAX_ROWS_PER_RUN = 50_000
@@ -132,9 +138,6 @@ def main():
 
     filename = f"backfill_{symbol.lower()}_{years[0]}_{years[-1]}.sql"
     with open(filename, "w") as f:
-        # DELETE scoped SOLO all'intervallo di date di questo backfill — mai
-        # le righe esistenti dei 5 periodi ufficiali per lo stesso simbolo.
-        # Idempotente: rieseguire lo stesso backfill non duplica righe.
         f.write(
             f"DELETE FROM ohlc_prices WHERE symbol='{symbol}' "
             f"AND timestamp >= '{overall_start.strftime('%Y-%m-%d %H:%M:%S+00:00')}' "
