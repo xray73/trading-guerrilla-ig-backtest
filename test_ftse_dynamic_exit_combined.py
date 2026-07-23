@@ -138,14 +138,38 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         # possibile)?
         self.n_exit_cap_saturo = 0
         self.n_exit_cap_disponibile = 0
+        # Diagnostica estesa: log di TUTTE le uscite anticipate (qualunque
+        # strumento) con bar_index, per rilevare rientri cross-asset non
+        # coperti dal cooldown attuale (che blocca solo stesso strumento+
+        # direzione). Finestra piu' ampia del cooldown effettivo per
+        # rilevare anche casi che il blocco non copre.
+        self.recent_exits_log = []  # [(bar_index, instrument)]
+        self.cascade_diag_window = 6
+        self.cascade_trade_log = []  # per trade aperto: instrument, entry_time, cascade info
 
-    def _registra_diagnostica_cascata(self):
+    def _registra_diagnostica_cascata(self, bar_index, instrument):
         if self._orders_today >= self.p.max_new_orders_per_day:
             self.n_exit_cap_saturo += 1
         else:
             self.n_exit_cap_disponibile += 1
+        self.recent_exits_log.append((bar_index, instrument))
 
     def _open_position(self, instrument, direction, bar, atr_at_entry, adx_at_entry):
+        # Diagnostica cascata: c'e' stata un'uscita anticipata (qualunque
+        # strumento) entro cascade_diag_window barre da QUESTO ingresso?
+        current_bar_index = getattr(self, "_pending_open_bar_index", None)
+        cascade_enabled = False
+        cascade_same_asset = False
+        cascade_cross_asset = False
+        if current_bar_index is not None:
+            for exit_bar, exit_inst in self.recent_exits_log:
+                if 0 <= current_bar_index - exit_bar <= self.cascade_diag_window:
+                    cascade_enabled = True
+                    if exit_inst == instrument:
+                        cascade_same_asset = True
+                    else:
+                        cascade_cross_asset = True
+
         super()._open_position(instrument, direction, bar, atr_at_entry, adx_at_entry)
         if self.open_positions and self.open_positions[-1].instrument == instrument:
             pos = self.open_positions[-1]
@@ -154,6 +178,12 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
             pos.locked_r = None
             pos.neg_streak = 0  # barre consecutive con condizione Ramo A vera
             pos.pos_streak = 0  # barre consecutive con condizione Ramo B vera
+            self.cascade_trade_log.append({
+                "instrument": instrument, "entry_time": bar["timestamp"],
+                "cascade_enabled": cascade_enabled,
+                "cascade_same_asset": cascade_same_asset,
+                "cascade_cross_asset": cascade_cross_asset,
+            })
 
     def _apply_dynamic_rule(self, pos, bar, bar_offset, inst) -> bool:
         adx_now = bar["adx"]
@@ -209,8 +239,9 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         if pos.neg_streak >= CONFIRM_BARS:
             spread = inst.spread_fixed
             exit_price = close_price - spread / 2 if pos.direction == "long" else close_price + spread / 2
-            self.last_dynamic_exit_bar[(pos.instrument, pos.direction)] = pos.entry_bar_index + bar_offset
-            self._registra_diagnostica_cascata()
+            exit_bar_index = pos.entry_bar_index + bar_offset
+            self.last_dynamic_exit_bar[(pos.instrument, pos.direction)] = exit_bar_index
+            self._registra_diagnostica_cascata(exit_bar_index, pos.instrument)
             self._close_position(pos, bar["timestamp"], exit_price, "dynamic_exit_negative")
             return True
 
@@ -267,7 +298,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                     # nostra regola, non dallo stop originale a -1R, quindi
                     # merita lo stesso cooldown anti-rientro del Ramo A
                     self.last_dynamic_exit_bar[(pos_instrument, pos_direction)] = bar_index
-                    self._registra_diagnostica_cascata()
+                    self._registra_diagnostica_cascata(bar_index, pos_instrument)
 
             self.equity_curve.append((ts, self.capital))
 
@@ -318,7 +349,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                 candidates.append({
                     "instrument": name, "direction": prev_bar["signal"],
                     "bar": cur_bar, "atr": prev_bar["atr"], "adx": prev_bar["adx"],
-                    "rr": self.p.rr_target,
+                    "rr": self.p.rr_target, "bar_index": i,
                 })
 
             if not candidates:
@@ -334,6 +365,7 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
                     break
                 if pd.isna(c["atr"]) or pd.isna(c["adx"]):
                     continue
+                self._pending_open_bar_index = c["bar_index"]
                 self._open_position(c["instrument"], c["direction"], c["bar"],
                                      c["atr"], c["adx"])
                 slots_free -= 1
@@ -391,6 +423,31 @@ def bootstrap_periods(signals, period_labels):
 
         n_dynamic_exit = int((dyn_trades["exit_reason"] == "dynamic_exit_negative").sum()) if len(dyn_trades) else 0
 
+        # Analisi cascata: unisco il log di apertura (instrument+entry_time)
+        # con i trade effettivi per confrontare il PnL medio dei trade
+        # "abilitati da cascata" (aperti entro poche barre da un'uscita
+        # anticipata, qualunque strumento) contro il resto.
+        cascade_analysis = {}
+        if dyn_engine.cascade_trade_log and len(dyn_trades):
+            log_df = pd.DataFrame(dyn_engine.cascade_trade_log)
+            merged = dyn_trades.merge(log_df, on=["instrument", "entry_time"], how="left")
+            merged["cascade_enabled"] = merged["cascade_enabled"].fillna(False)
+            merged["cascade_same_asset"] = merged["cascade_same_asset"].fillna(False)
+            merged["cascade_cross_asset"] = merged["cascade_cross_asset"].fillna(False)
+
+            non_cascade = merged[~merged["cascade_enabled"]]
+            cascade = merged[merged["cascade_enabled"]]
+            same_asset = merged[merged["cascade_same_asset"]]
+            cross_asset = merged[merged["cascade_cross_asset"]]
+
+            cascade_analysis = {
+                "n_non_cascade": len(non_cascade), "pnl_medio_non_cascade": float(non_cascade["pnl"].mean()) if len(non_cascade) else 0.0,
+                "n_cascade": len(cascade), "pnl_medio_cascade": float(cascade["pnl"].mean()) if len(cascade) else 0.0,
+                "n_same_asset": len(same_asset), "pnl_medio_same_asset": float(same_asset["pnl"].mean()) if len(same_asset) else 0.0,
+                "n_cross_asset": len(cross_asset), "pnl_medio_cross_asset": float(cross_asset["pnl"].mean()) if len(cross_asset) else 0.0,
+                "pnl_totale_cascade": float(cascade["pnl"].sum()) if len(cascade) else 0.0,
+            }
+
         baseline_exit_counts = baseline_trades["exit_reason"].value_counts().to_dict() if len(baseline_trades) else {}
         dyn_exit_counts = dyn_trades["exit_reason"].value_counts().to_dict() if len(dyn_trades) else {}
 
@@ -418,6 +475,7 @@ def bootstrap_periods(signals, period_labels):
             "per_instrument": per_instrument,
             "n_exit_cap_saturo": dyn_engine.n_exit_cap_saturo,
             "n_exit_cap_disponibile": dyn_engine.n_exit_cap_disponibile,
+            "cascade_analysis": cascade_analysis,
         })
 
     combined_deltas = pd.concat(all_delta_days).values
@@ -455,6 +513,15 @@ def print_result(label, res):
         print(f"      Diagnostica cascata: {s['n_exit_cap_saturo']} uscite con tetto ordini GIA' SATURO "
               f"({pct_saturo:.0f}%, cascata bloccata) | {s['n_exit_cap_disponibile']} con margine "
               f"residuo ({100-pct_saturo:.0f}%, cascata possibile)")
+        ca = s.get("cascade_analysis") or {}
+        if ca:
+            print(f"      Trade NON da cascata: n={ca['n_non_cascade']}  PnL medio={ca['pnl_medio_non_cascade']:+.2f}")
+            print(f"      Trade DA CASCATA (entro 6 barre da un'uscita anticipata, qualunque strumento): "
+                  f"n={ca['n_cascade']}  PnL medio={ca['pnl_medio_cascade']:+.2f}  "
+                  f"PnL totale={ca['pnl_totale_cascade']:+.2f}")
+            print(f"          di cui stesso strumento: n={ca['n_same_asset']}  PnL medio={ca['pnl_medio_same_asset']:+.2f}")
+            print(f"          di cui strumento DIVERSO (cross-asset): n={ca['n_cross_asset']}  "
+                  f"PnL medio={ca['pnl_medio_cross_asset']:+.2f}")
         for inst_name, pi in s["per_instrument"].items():
             print(f"      {inst_name:<8} delta={pi['delta']:>+9.2f}  "
                   f"uscite anticipate={pi['n_dynamic_exit']:>3}  "
