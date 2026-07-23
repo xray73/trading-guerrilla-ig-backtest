@@ -1,0 +1,33 @@
+name: Test Calibration Controls v2 (design corretto)
+
+on:
+  workflow_dispatch:
+    inputs:
+      holdout_period:
+        description: 'Periodo da usare come holdout (2015-2016, 2020-covid, 2023, 2024-2025, 2026-ytd)'
+        required: true
+        default: '2020-covid'
+        type: string
+
+jobs:
+  test-calibration-controls-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests dukascopy-python
+
+      - name: Esegui entrambi i controlli di calibrazione (v2)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python test_calibration_controls_v2.py "${{ github.event.inputs.holdout_period }}"
