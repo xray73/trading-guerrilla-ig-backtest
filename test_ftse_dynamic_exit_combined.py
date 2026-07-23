@@ -1,39 +1,46 @@
 """
-test_ftse_dynamic_exit_combined.py — Regola di gestione post-ingresso
-unificata per DAX+FTSE100 NELLO STESSO RUN (non due run separati per
-strumento) — motivazione: entrambi condividono lo stesso tetto
-posizioni concorrenti e lo stesso kill switch giornaliero, quindi
-chiudere un trade in anticipo su uno strumento può liberare uno slot
-che fa scattare un segnale sull'altro (effetto a cascata) — un run a
-singolo strumento perderebbe questo effetto per costruzione.
+test_ftse_dynamic_exit_combined.py — v2: aggiunge CONFERMA A BARRE
+CONSECUTIVE (CONFIRM_BARS=2) prima di agire, sia su Ramo A che Ramo B.
 
-ATTENZIONE — COMPROMESSO DICHIARATO: le soglie (NEG_THRESHOLD,
-POS_THRESHOLD, DECEL_RATIO) vengono TUTTE dall'analisi fatta oggi solo
-su FTSE100 — non sono state ricalibrate per DAX, che potrebbe avere un
-pattern di decelerazione ADX diverso o assente. Applicate identiche a
-entrambi per semplicità in questo primo test; il conteggio delle
-uscite anticipate viene riportato PER STRUMENTO separatamente proprio
-per poter vedere se il meccanismo si comporta in modo diverso tra i
-due (come quasi tutto il resto testato oggi) prima di eventualmente
-calibrare soglie separate in un secondo giro.
+MOTIVAZIONE DEL CAMBIO (analisi su research_v6_trade_path_continuous,
+23/07/2026, dopo il fallimento della v1 a trigger singolo, z=-3.28):
+  - Ramo B (trigger singolo): 65,4% dei trade toccati erano falsi
+    allarmi — il prezzo non scendeva mai al livello bloccato in seguito
+  - Ramo A (trigger singolo): colpiva il 13,8% dei vincenti durante il
+    loro normale tuffo iniziale (irreversibile, uscita a mercato)
+  - Un reset "se R risale sopra soglia" NON funziona come filtro: quasi
+    tutti i trade rimbalzano prima o poi (100% dei "necessari", 99,4%
+    dei "non necessari") — non discrimina, vanificherebbe la regola
+  - La correzione scelta: richiedere che la condizione sia vera per
+    CONFIRM_BARS barre CONSECUTIVE (non un singolo tocco) prima di
+    agire — riduce i falsi positivi da rumore di singola barra senza
+    fare affidamento su un reset che non discrimina.
 
-Sintesi di due pattern trovati oggi (analisi originaria su FTSE100):
-  - "giveback": trade che toccano profitto poi tornano indietro fino
-    allo stop (analisi originale idea 1)
-  - "ADX decelera + prezzo già in perdita a barra ~4": trade destinati
-    a perdere già distinguibili da chi recupererà (analisi successiva)
+Regola unificata per DAX+FTSE100 NELLO STESSO RUN (non due run
+separati) — condividono tetto posizioni e kill switch, un run a
+singolo strumento perderebbe l'effetto a cascata sugli slot condivisi.
+
+ATTENZIONE — COMPROMESSO DICHIARATO: soglie (NEG_THRESHOLD,
+POS_THRESHOLD, DECEL_RATIO) derivate dall'analisi su FTSE100, applicate
+identiche a DAX (pattern descrittivo verificato simmetrico tra i due,
+vedi sessione). Conteggio uscite riportato per strumento separatamente.
 
 REGOLA (controllata OGNI barra da bar_offset>=3, mentre la posizione è
-aperta, SOLO FTSE100):
+aperta):
   early_slope = pendenza ADX barre 0-2 (calcolata una volta, congelata)
   avg_slope   = (adx_corrente - adx_entrata) / bar_offset
   decelerazione = avg_slope < early_slope * DECEL_RATIO
 
-  Se decelerazione E R_corrente <= NEG_THRESHOLD:
+  Se decelerazione E R_corrente <= NEG_THRESHOLD per CONFIRM_BARS barre
+  consecutive:
       RAMO A -> chiusura immediata a mercato
-  Se decelerazione E R_corrente >= POS_THRESHOLD:
+  Se decelerazione E R_corrente >= POS_THRESHOLD per CONFIRM_BARS barre
+  consecutive:
       RAMO B -> stop dinamico bloccato a LOCK_FRACTION * R_corrente
                 (si muove SOLO a favore, mai indietro)
+  Il contatore consecutivo si azzera se la condizione smette di essere
+  vera anche per una sola barra (nessun reset "a rimbalzo" — verificato
+  non discriminante).
   Altrimenti: nessuna modifica, stop/target originali intatti.
 
 PARAMETRI FISSATI ORA, PRIMA DI VEDERE RISULTATI:
@@ -78,6 +85,7 @@ POS_THRESHOLD = 0.3
 LOCK_FRACTION = 0.5
 DECEL_RATIO = 0.3
 MIN_BARS_EARLY = 3
+CONFIRM_BARS = 2  # barre consecutive richieste prima di agire (Ramo A e Ramo B)
 
 PERIODS = {
     "2015-2016": ("2015-01-01", "2016-12-31"),
@@ -114,6 +122,8 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
             pos.adx_history = [adx_at_entry]
             pos.early_slope = None
             pos.locked_r = None
+            pos.neg_streak = 0  # barre consecutive con condizione Ramo A vera
+            pos.pos_streak = 0  # barre consecutive con condizione Ramo B vera
 
     def _apply_dynamic_rule(self, pos, bar, bar_offset, inst) -> bool:
         adx_now = bar["adx"]
@@ -130,6 +140,8 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         avg_slope = (pos.adx_history[-1] - pos.adx_history[0]) / bar_offset
         is_decel = avg_slope < pos.early_slope * DECEL_RATIO
         if not is_decel:
+            pos.neg_streak = 0
+            pos.pos_streak = 0
             return False
 
         stop_distance = pos.atr_at_entry * inst.atr_multiplier
@@ -139,13 +151,29 @@ class BacktestEngineDynamicExitCombined(BacktestEngineFloatingKillSwitch):
         else:
             r_now = (pos.entry_price - close_price) / stop_distance
 
+        # Condizioni valutate ogni barra, ma l'azione scatta solo dopo
+        # CONFIRM_BARS barre CONSECUTIVE con la stessa condizione vera —
+        # verificato con analisi su research_v6_trade_path_continuous: il
+        # trigger al primo tocco causava 65% di falsi positivi sul Ramo B
+        # (il prezzo non scendeva mai al livello bloccato) e colpiva il
+        # 13,8% dei vincenti anche sul Ramo A (tuffo iniziale normale).
         if r_now <= NEG_THRESHOLD:
+            pos.neg_streak += 1
+            pos.pos_streak = 0
+        elif r_now >= POS_THRESHOLD:
+            pos.pos_streak += 1
+            pos.neg_streak = 0
+        else:
+            pos.neg_streak = 0
+            pos.pos_streak = 0
+
+        if pos.neg_streak >= CONFIRM_BARS:
             spread = inst.spread_fixed
             exit_price = close_price - spread / 2 if pos.direction == "long" else close_price + spread / 2
             self._close_position(pos, bar["timestamp"], exit_price, "dynamic_exit_negative")
             return True
 
-        if r_now >= POS_THRESHOLD:
+        if pos.pos_streak >= CONFIRM_BARS:
             target_locked_r = r_now * LOCK_FRACTION
             if pos.locked_r is None or target_locked_r > pos.locked_r:
                 pos.locked_r = target_locked_r
@@ -404,7 +432,8 @@ def main():
     signals = {name: eng.generate_signals(hist[name], eng.INSTRUMENTS[name]) for name in hist}
 
     print(f"\nParametri (fissati prima dei risultati): NEG_THRESHOLD={NEG_THRESHOLD}, "
-          f"POS_THRESHOLD={POS_THRESHOLD}, LOCK_FRACTION={LOCK_FRACTION}, DECEL_RATIO={DECEL_RATIO}\n")
+          f"POS_THRESHOLD={POS_THRESHOLD}, LOCK_FRACTION={LOCK_FRACTION}, DECEL_RATIO={DECEL_RATIO}, "
+          f"CONFIRM_BARS={CONFIRM_BARS}\n")
 
     sanity_check(signals)
 
