@@ -17,6 +17,15 @@ trovato solo azioni singole). Per aggiungere un nuovo simbolo:
   3. Da quel momento il simbolo e' disponibile per qualunque run futura,
      nessun nuovo script da scrivere.
 
+AGGIORNAMENTO 24/07/2026 (2): aggiunto CAC40 — costante confermata via
+discover_dukascopy_cac40.py (sessione precedente), dati OHLC mai
+scaricati/persistiti fino ad ora nonostante la costante fosse gia'
+nota. Backfill richiesto esplicitamente per completare la copertura
+CAC40 in vista di un'eventuale ripresa del filone cointegrazione
+DAX-CAC40 (attualmente chiuso, vedi 03_CLOSED_RESEARCH_REGISTRY.md —
+nessuna cointegrazione trovata in nessuno dei 5 periodi ufficiali con
+i dati disponibili all'epoca del test).
+
 AGGIORNAMENTO 24/07/2026: aggiunti BUND, UKGILT, USTBOND — primo passo
 dell'esplorazione futures obbligazionari come classe di asset alternativa
 a indici/forex (fuori dal perimetro attuale del Charter, solo
@@ -26,6 +35,11 @@ Gilt scelti come priorita' (minor rischio percepito tra le classi
 extra-Charter considerate: energia, agricole, crypto — movimenti guidati
 da tassi/banche centrali, tipicamente piu' graduali). USTBOND trovato
 come sottoprodotto della stessa ricerca, aggiunto per completezza.
+NOTA 24/07/2026: filone Bund/Gilt/Treasury chiuso — nessun Bund Future
+trovato su Dukascopy (solo variante Total-Return CFD, mismatch
+strutturale vs Future IG irrisolvibile con l'infrastruttura dati
+attuale). BUND/UKGILT/USTBOND restano in SYMBOL_MAP per compatibilita'
+con i dati gia' backfillati in D1, ma non verranno utilizzati.
 
 AGGIORNAMENTO 23/07/2026: rimossi ITALY40 e IBEX35 da SYMBOL_MAP — dati
 corrispondenti eliminati da ohlc_prices in D1 (32.909 righe ITALY40,
@@ -38,6 +52,9 @@ Costanti confermate nel progetto (tutte verificate via discover script):
               discover_dukascopy_eurusd.py, verifica incrociata)
   EURUSD   -> INSTRUMENT_FX_MAJORS_EUR_USD  (confermata 23/07/2026 via
               discover_dukascopy_eurusd.py)
+  CAC40    -> INSTRUMENT_IDX_EUROPE_E_CAAC_40  (confermata sessione
+              precedente via discover_dukascopy_cac40.py, dati
+              scaricati per la prima volta 24/07/2026)
   BUND     -> INSTRUMENT_BND_CFD_BUND_TR_EUR      (confermata 24/07/2026
               via discover_dukascopy_bund_gilt.py)
   UKGILT   -> INSTRUMENT_BND_CFD_UKGILT_TR_GBP    (confermata 24/07/2026,
@@ -57,6 +74,7 @@ import dukascopy_python.instruments as instr
 SYMBOL_MAP = {
     "GBPUSD": "INSTRUMENT_FX_MAJORS_GBP_USD",
     "EURUSD": "INSTRUMENT_FX_MAJORS_EUR_USD",
+    "CAC40": "INSTRUMENT_IDX_EUROPE_E_CAAC_40",
     "BUND": "INSTRUMENT_BND_CFD_BUND_TR_EUR",
     "UKGILT": "INSTRUMENT_BND_CFD_UKGILT_TR_GBP",
     "USTBOND": "INSTRUMENT_BND_CFD_USTBOND_TR_USD",
