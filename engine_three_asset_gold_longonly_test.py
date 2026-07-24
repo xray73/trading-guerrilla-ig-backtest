@@ -168,15 +168,43 @@ def bootstrap_delta(results: list, n_iter: int = 2000, seed: int = 42):
         null_deltas.append(d_filt - d_base)
 
     null_deltas = np.array(null_deltas)
-    z = (observed_delta - null_deltas.mean()) / null_deltas.std()
+    # CORRETTO 24/07/2026: lo z-score va calcolato contro l'ipotesi nulla
+    # (delta=0), usando la std della distribuzione bootstrap come stima
+    # dell'errore standard — NON contro la media della distribuzione
+    # bootstrap stessa, che per costruzione converge al delta osservato
+    # (bug della versione precedente: z risultava sempre ~0 indipendente-
+    # mente dal fatto che l'effetto fosse reale o meno).
+    z = observed_delta / null_deltas.std()
     ci_low, ci_high = np.percentile(null_deltas, [2.5, 97.5])
     pct_le_zero = (null_deltas <= 0).mean() if observed_delta > 0 else (null_deltas >= 0).mean()
 
     print(f"\nDelta osservato (filtrato - baseline), aggregato 5 periodi: {observed_delta:+.2f} EUR")
     print(f"IC 95% bootstrap: [{ci_low:+.2f}, {ci_high:+.2f}] EUR")
-    print(f"Z-score: {z:.3f}")
+    print(f"Z-score (contro delta=0): {z:.3f}")
     print(f"Frazione iterazioni bootstrap con segno opposto/nullo: {pct_le_zero*100:.1f}%")
-    print(f"\nVerdetto: {'PROMOSSO (z>=2, IC esclude lo zero)' if abs(z) >= 2 and (ci_low>0 or ci_high<0) else 'NON PROMOSSO / AMBIGUO'}")
+
+    # NUOVO: leave-one-period-out — verifica che il delta aggregato non sia
+    # trainato da un solo periodo su cinque (lezione del 24/07: un primo
+    # tentativo aveva un delta aggregato forte spiegato quasi interamente
+    # da un solo periodo su cinque, mai controllato automaticamente prima).
+    print("\n--- Controllo leave-one-period-out (nessun periodo deve dominare da solo) ---")
+    concentrazione_sospetta = False
+    for r in results:
+        delta_senza = observed_delta - r["delta"]
+        segno_cambia = (observed_delta > 0) != (delta_senza > 0) if abs(delta_senza) > 0.01 else True
+        flag = "  <-- ATTENZIONE: il delta cambia segno o si annulla senza questo periodo" if segno_cambia else ""
+        print(f"  Escludendo {r['periodo']}: delta residuo = {delta_senza:+.2f} EUR{flag}")
+        if segno_cambia:
+            concentrazione_sospetta = True
+
+    promosso = (abs(z) >= 2) and (ci_low > 0 or ci_high < 0) and not concentrazione_sospetta
+    if concentrazione_sospetta:
+        verdetto = "NON PROMOSSO — il risultato aggregato è trainato da un solo periodo, non robusto nel tempo"
+    elif promosso:
+        verdetto = "PROMOSSO (z>=2, IC esclude lo zero, robusto escludendo ogni singolo periodo)"
+    else:
+        verdetto = "NON PROMOSSO / AMBIGUO"
+    print(f"\nVerdetto: {verdetto}")
 
 
 def main():
