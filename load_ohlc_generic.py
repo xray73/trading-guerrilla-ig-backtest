@@ -17,6 +17,16 @@ trovato solo azioni singole). Per aggiungere un nuovo simbolo:
   3. Da quel momento il simbolo e' disponibile per qualunque run futura,
      nessun nuovo script da scrivere.
 
+AGGIORNAMENTO 24/07/2026: aggiunti BUND, UKGILT, USTBOND — primo passo
+dell'esplorazione futures obbligazionari come classe di asset alternativa
+a indici/forex (fuori dal perimetro attuale del Charter, solo
+esplorazione tecnica per ora, nessuna decisione di attivazione). Costanti
+confermate via discover_dukascopy_bund_gilt.py il 24/07/2026. Bund e
+Gilt scelti come priorita' (minor rischio percepito tra le classi
+extra-Charter considerate: energia, agricole, crypto — movimenti guidati
+da tassi/banche centrali, tipicamente piu' graduali). USTBOND trovato
+come sottoprodotto della stessa ricerca, aggiunto per completezza.
+
 AGGIORNAMENTO 23/07/2026: rimossi ITALY40 e IBEX35 da SYMBOL_MAP — dati
 corrispondenti eliminati da ohlc_prices in D1 (32.909 righe ITALY40,
 IBEX35 non aveva mai avuto dati caricati nonostante fosse mappato).
@@ -28,6 +38,12 @@ Costanti confermate nel progetto (tutte verificate via discover script):
               discover_dukascopy_eurusd.py, verifica incrociata)
   EURUSD   -> INSTRUMENT_FX_MAJORS_EUR_USD  (confermata 23/07/2026 via
               discover_dukascopy_eurusd.py)
+  BUND     -> INSTRUMENT_BND_CFD_BUND_TR_EUR      (confermata 24/07/2026
+              via discover_dukascopy_bund_gilt.py)
+  UKGILT   -> INSTRUMENT_BND_CFD_UKGILT_TR_GBP    (confermata 24/07/2026,
+              stesso script)
+  USTBOND  -> INSTRUMENT_BND_CFD_USTBOND_TR_USD   (confermata 24/07/2026,
+              stesso script, trovata come sottoprodotto della ricerca)
 """
 
 from __future__ import annotations
@@ -41,6 +57,9 @@ import dukascopy_python.instruments as instr
 SYMBOL_MAP = {
     "GBPUSD": "INSTRUMENT_FX_MAJORS_GBP_USD",
     "EURUSD": "INSTRUMENT_FX_MAJORS_EUR_USD",
+    "BUND": "INSTRUMENT_BND_CFD_BUND_TR_EUR",
+    "UKGILT": "INSTRUMENT_BND_CFD_UKGILT_TR_GBP",
+    "USTBOND": "INSTRUMENT_BND_CFD_USTBOND_TR_USD",
 }
 
 CHUNK_SIZE = 500
