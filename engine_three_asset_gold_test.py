@@ -1,242 +1,220 @@
-"""
-engine_three_asset_gold_test.py — Sanity check + impatto sui 5 periodi
-ufficiali dell'estensione a 3 strumenti (DAX/FTSE100/GOLD) con
-selezione multi-candidato per correlazione minima (engine_three_asset_gold.py).
+ """
+engine_three_asset_gold_longonly_test.py — Sanity check + test causale del
+filtro GOLD long-only (24/07/2026).
 
-Tetto posizioni concorrenti INVARIATO a 2 — nessuno slot in più,
-nessuna diluizione di capitale. GOLD compete per gli stessi 2 slot di
-V6 e mean-reversion. Selezione basata SOLO su correlazione (opzione 1
-scelta in chat 19/07/2026), nessun peso sulla forza del segnale.
+PASSO 1 (obbligatorio, non saltare): con gold_longonly_filter_active=False,
+BacktestEngineV6GoldLongOnly deve produrre risultati IDENTICI a
+BacktestEngineV6Gold su tutti e 5 i periodi ufficiali. Se anche un solo
+trade differisce, il motore ha un bug e va corretto PRIMA di guardare il
+passo 2 — stesso principio non-negoziabile di ogni sottoclasse nel progetto.
 
-VERSIONE 2 (19/07/2026) — ottimizzata per velocità: la versione
-precedente faceva un fetch Dukascopy separato per ciascuna
-combinazione periodo×strumento (17 chiamate di rete: 2 per il sanity
-check + 5 periodi × 3 strumenti), andando in timeout su GitHub Actions.
-Questa versione scarica UNA SOLA VOLTA per strumento l'intero storico
-2014-2026 (3 chiamate di rete totali), genera i segnali una sola volta
-sull'intera serie, e affetta localmente (nessuna rete) per ciascuno
-dei 5 periodi — stesso identico risultato, drasticamente più veloce.
+PASSO 2: confronto vero, gold_longonly_filter_active=True vs baseline
+(BacktestEngineV6Gold, short incluso), sui 5 periodi ufficiali. Metriche:
+PnL totale, R medio, numero trade, drawdown.
 
-Check A (sanity): con GOLD tradable=False (solo DAX+FTSE100), il
-motore esteso deve produrre risultati IDENTICI al motore standard
-(BacktestEngineFloatingKillSwitch / BacktestEngineMeanReversion).
+PASSO 3: bootstrap a blocchi di giornata (day-block, N=2000, stesso
+protocollo di Regole_Backtest_MonteCarlo.md) sul delta PnL tra le due
+varianti, per calibrare se la differenza osservata e' oltre il rumore.
 
-Check B (impatto): confronto baseline (2 strumenti) vs esteso (3
-strumenti) sui 5 periodi ufficiali, per V6 (capitale 1.400EUR) e
-mean-reversion (capitale 600EUR) separatamente. Metriche complete:
-n_trade, win_rate, profit_factor, PnL, max_drawdown, expectancy,
-quante volte GOLD è stato scelto.
-
-Nessuna scrittura su D1. Nessuna modifica a engine.py, live_execute.py
-o alle sottoclassi esistenti.
+Uso: python engine_three_asset_gold_longonly_test.py
 """
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-import dukascopy_python
-from dukascopy_python.instruments import (
-    INSTRUMENT_IDX_EUROPE_E_DAAX, INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
-    INSTRUMENT_FX_METALS_XAU_USD,
-)
-
 import engine as eng
-from engine_floating_kill_switch import BacktestEngineFloatingKillSwitch
-from engine_mean_reversion import BacktestEngineMeanReversion
-from mean_reversion_signals import generate_mean_reversion_signals
-from engine_three_asset_gold import (
-    BacktestEngineV6Gold, BacktestEngineMeanReversionGold,
-    instruments_with_gold,
-)
+from engine_three_asset_gold import BacktestEngineV6Gold, instruments_with_gold
+from engine_three_asset_gold_longonly import BacktestEngineV6GoldLongOnly
+from ohlc_data_source import get_ohlc
+import os
 
-CAPITAL_V6 = 1400.0
-CAPITAL_MR = 600.0
-SYMBOLS_3 = {
-    "DAX": INSTRUMENT_IDX_EUROPE_E_DAAX,
-    "FTSE100": INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
-    "GOLD": INSTRUMENT_FX_METALS_XAU_USD,
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
+
+PERIODS = {
+    "2015-2016": ("2015-01-01", "2016-12-31"),
+    "2020-covid": ("2020-01-01", "2020-12-31"),
+    "2023": ("2023-01-01", "2023-12-31"),
+    "2024-2025": ("2024-01-01", "2025-12-31"),
+    "2026-ytd": ("2026-01-01", "2026-07-15"),
 }
 
-PERIODS = [
-    ("2015-2016", "2015-01-05", "2016-12-29"),
-    ("2020-covid", "2020-01-02", "2020-12-30"),
-    ("2023", "2023-01-02", "2023-12-30"),
-    ("2024-2025", "2024-01-03", "2025-12-31"),
-    ("2026-ytd", "2026-01-05", "2026-07-10"),
-]
-
-FULL_FETCH_START = datetime(2014, 10, 1, tzinfo=timezone.utc)
-FULL_FETCH_END = datetime(2026, 7, 11, tzinfo=timezone.utc)
+CAPITALE_INIZIALE = 2000.0
+INSTRUMENTS = instruments_with_gold()
 
 
-def fetch_bars_full(symbol_const) -> pd.DataFrame:
-    df = dukascopy_python.fetch(
-        symbol_const, dukascopy_python.INTERVAL_MIN_30, dukascopy_python.OFFER_SIDE_BID,
-        FULL_FETCH_START, FULL_FETCH_END,
-    ).reset_index()
-    ts_col = df.columns[0]
-    df = df.rename(columns={ts_col: "timestamp"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
+def load_data():
+    print("Carico OHLC DAX/FTSE100/GOLD da D1 (cache incrementale)...")
+    raw = {}
+    for name in ["DAX", "FTSE100", "GOLD"]:
+        raw[name] = get_ohlc(name, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, log=print)
+    signals = {name: eng.generate_signals(raw[name], INSTRUMENTS[name]) for name in raw}
+    return signals
 
 
-def slice_period(df: pd.DataFrame, p_start: pd.Timestamp, p_end: pd.Timestamp) -> pd.DataFrame:
-    return df[(df["timestamp"] >= p_start) & (df["timestamp"] < p_end)].reset_index(drop=True)
+def slice_period(signals: dict, start: str, end: str) -> dict:
+    out = {}
+    for name, df in signals.items():
+        mask = (df["timestamp"] >= pd.Timestamp(start, tz="UTC")) & (df["timestamp"] <= pd.Timestamp(end, tz="UTC"))
+        out[name] = df.loc[mask].reset_index(drop=True)
+    return out
 
 
-def metrics_summary(trades_df: pd.DataFrame, capital0: float) -> dict:
-    if trades_df.empty:
-        return {"n_trades": 0, "win_rate_pct": np.nan, "profit_factor": np.nan,
-                "pnl_total": 0.0, "expectancy": np.nan, "max_drawdown_pct": np.nan}
-    wins = trades_df[trades_df["pnl"] > 0]
-    losses = trades_df[trades_df["pnl"] <= 0]
-    sum_wins, sum_losses = wins["pnl"].sum(), losses["pnl"].sum()
-    pf = sum_wins / abs(sum_losses) if sum_losses != 0 else np.inf
-    equity = capital0 + trades_df["pnl"].cumsum()
-    running_max = equity.cummax()
-    drawdown_pct = (equity - running_max) / running_max
-    max_dd = drawdown_pct.min() * 100
-    return {
-        "n_trades": len(trades_df), "win_rate_pct": 100 * len(wins) / len(trades_df),
-        "profit_factor": pf, "pnl_total": trades_df["pnl"].sum(),
-        "expectancy": trades_df["pnl"].mean(), "max_drawdown_pct": max_dd,
-    }
+def run_sanity_check(signals: dict):
+    print("\n" + "=" * 70)
+    print("PASSO 1 — SANITY CHECK (parametro neutro deve riprodurre il baseline)")
+    print("=" * 70)
+    all_ok = True
+    for label, (start, end) in PERIODS.items():
+        data = slice_period(signals, start, end)
+
+        eng_baseline = BacktestEngineV6Gold(capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
+        trades_base, metrics_base = eng_baseline.run(data)
+
+        eng_neutral = BacktestEngineV6GoldLongOnly(
+            capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
+            gold_longonly_filter_active=False,
+        )
+        trades_neutral, metrics_neutral = eng_neutral.run(data)
+
+        n_base, n_neutral = len(trades_base), len(trades_neutral)
+        pnl_base = float(metrics_base["pnl_totale"].iloc[0]) if "pnl_totale" in metrics_base else eng_baseline.capital - CAPITALE_INIZIALE
+        pnl_neutral = float(metrics_neutral["pnl_totale"].iloc[0]) if "pnl_totale" in metrics_neutral else eng_neutral.capital - CAPITALE_INIZIALE
+
+        identical = (n_base == n_neutral) and abs(pnl_base - pnl_neutral) < 0.01
+        status = "OK" if identical else "FALLITO — DIFFERENZA RILEVATA, NON PROCEDERE"
+        print(f"  {label}: baseline n_trade={n_base} pnl={pnl_base:.2f}  |  "
+              f"neutro n_trade={n_neutral} pnl={pnl_neutral:.2f}  ->  {status}")
+        if not identical:
+            all_ok = False
+
+    if not all_ok:
+        raise SystemExit("\nSANITY CHECK FALLITO — correggere il motore prima di qualunque test causale.")
+    print("\nSanity check PASS su tutti e 5 i periodi. Procedo al test causale.\n")
+
+
+def run_causal_test(signals: dict):
+    print("=" * 70)
+    print("PASSO 2 — CONFRONTO: baseline (GOLD long+short) vs GOLD long-only")
+    print("=" * 70)
+
+    results = []
+    for label, (start, end) in PERIODS.items():
+        data = slice_period(signals, start, end)
+
+        eng_baseline = BacktestEngineV6Gold(capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
+        trades_base, _ = eng_baseline.run(data)
+        pnl_base = eng_baseline.capital - CAPITALE_INIZIALE
+
+        eng_filtered = BacktestEngineV6GoldLongOnly(
+            capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
+            gold_longonly_filter_active=True,
+        )
+        trades_filt, _ = eng_filtered.run(data)
+        pnl_filt = eng_filtered.capital - CAPITALE_INIZIALE
+
+        delta = pnl_filt - pnl_base
+        print(f"\n--- {label} ---")
+        print(f"  Baseline (GOLD long+short): {len(trades_base)} trade, PnL {pnl_base:+.2f}EUR")
+        print(f"  Filtrato (GOLD long-only):  {len(trades_filt)} trade, PnL {pnl_filt:+.2f}EUR")
+        print(f"  Delta: {delta:+.2f}EUR")
+
+        results.append({
+            "periodo": label, "n_trade_base": len(trades_base), "pnl_base": pnl_base,
+            "n_trade_filt": len(trades_filt), "pnl_filt": pnl_filt, "delta": delta,
+            "trades_base": trades_base, "trades_filt": trades_filt,
+        })
+
+    return results
+
+
+def bootstrap_delta(results: list, n_iter: int = 2000, seed: int = 42):
+    """Bootstrap a blocchi di giornata sul delta di PnL, aggregato sui 5
+    periodi. Stesso protocollo standard del progetto (Regole_Backtest_
+    MonteCarlo.md): resampling per giorno, non per singolo trade, per non
+    rompere la dipendenza tra trade dello stesso giorno."""
+    print("\n" + "=" * 70)
+    print("PASSO 3 — BOOTSTRAP a blocchi di giornata sul delta (N=2000)")
+    print("=" * 70)
+
+    rng = np.random.default_rng(seed)
+
+    all_days_base = {}
+    all_days_filt = {}
+    for r in results:
+        tb = r["trades_base"]
+        tf = r["trades_filt"]
+        if len(tb):
+            tb = tb.copy()
+            tb["day"] = pd.to_datetime(tb["entry_time"]).dt.date.astype(str)
+        if len(tf):
+            tf = tf.copy()
+            tf["day"] = pd.to_datetime(tf["entry_time"]).dt.date.astype(str)
+        for day, grp in (tb.groupby("day") if len(tb) else []):
+            all_days_base.setdefault(day, []).extend(grp["pnl"].tolist())
+        for day, grp in (tf.groupby("day") if len(tf) else []):
+            all_days_filt.setdefault(day, []).extend(grp["pnl"].tolist())
+
+    days = sorted(set(all_days_base) | set(all_days_filt))
+    observed_delta = sum(sum(v) for v in all_days_filt.values()) - sum(sum(v) for v in all_days_base.values())
+
+    null_deltas = []
+    for _ in range(n_iter):
+        sampled_days = rng.choice(days, size=len(days), replace=True)
+        d_base = sum(sum(all_days_base.get(d, [])) for d in sampled_days)
+        d_filt = sum(sum(all_days_filt.get(d, [])) for d in sampled_days)
+        null_deltas.append(d_filt - d_base)
+
+    null_deltas = np.array(null_deltas)
+    # CORRETTO 24/07/2026: lo z-score va calcolato contro l'ipotesi nulla
+    # (delta=0), usando la std della distribuzione bootstrap come stima
+    # dell'errore standard — NON contro la media della distribuzione
+    # bootstrap stessa, che per costruzione converge al delta osservato
+    # (bug della versione precedente: z risultava sempre ~0 indipendente-
+    # mente dal fatto che l'effetto fosse reale o meno).
+    z = observed_delta / null_deltas.std()
+    ci_low, ci_high = np.percentile(null_deltas, [2.5, 97.5])
+    pct_le_zero = (null_deltas <= 0).mean() if observed_delta > 0 else (null_deltas >= 0).mean()
+
+    print(f"\nDelta osservato (filtrato - baseline), aggregato 5 periodi: {observed_delta:+.2f} EUR")
+    print(f"IC 95% bootstrap: [{ci_low:+.2f}, {ci_high:+.2f}] EUR")
+    print(f"Z-score (contro delta=0): {z:.3f}")
+    print(f"Frazione iterazioni bootstrap con segno opposto/nullo: {pct_le_zero*100:.1f}%")
+
+    # NUOVO: leave-one-period-out — verifica che il delta aggregato non sia
+    # trainato da un solo periodo su cinque (lezione del 24/07: un primo
+    # tentativo aveva un delta aggregato forte spiegato quasi interamente
+    # da un solo periodo su cinque, mai controllato automaticamente prima).
+    print("\n--- Controllo leave-one-period-out (nessun periodo deve dominare da solo) ---")
+    concentrazione_sospetta = False
+    for r in results:
+        delta_senza = observed_delta - r["delta"]
+        segno_cambia = (observed_delta > 0) != (delta_senza > 0) if abs(delta_senza) > 0.01 else True
+        flag = "  <-- ATTENZIONE: il delta cambia segno o si annulla senza questo periodo" if segno_cambia else ""
+        print(f"  Escludendo {r['periodo']}: delta residuo = {delta_senza:+.2f} EUR{flag}")
+        if segno_cambia:
+            concentrazione_sospetta = True
+
+    promosso = (abs(z) >= 2) and (ci_low > 0 or ci_high < 0) and not concentrazione_sospetta
+    if concentrazione_sospetta:
+        verdetto = "NON PROMOSSO — il risultato aggregato è trainato da un solo periodo, non robusto nel tempo"
+    elif promosso:
+        verdetto = "PROMOSSO (z>=2, IC esclude lo zero, robusto escludendo ogni singolo periodo)"
+    else:
+        verdetto = "NON PROMOSSO / AMBIGUO"
+    print(f"\nVerdetto: {verdetto}")
 
 
 def main():
-    log_lines = []
-    def log(msg):
-        print(msg)
-        log_lines.append(msg)
-
-    log("=== Motore 3 strumenti (DAX/FTSE100/GOLD), selezione per correlazione minima ===")
-    log("Tetto posizioni concorrenti invariato a 2 — nessuno slot in più.\n")
-
-    instruments_2 = dict(eng.INSTRUMENTS)
-    instruments_3 = instruments_with_gold()
-
-    log("Scarico storico DAX/FTSE100/GOLD (un solo fetch per strumento, 2014-2026)...")
-    raw_full = {name: fetch_bars_full(const) for name, const in SYMBOLS_3.items()}
-    log("Fatto.\n")
-
-    log("Genero segnali V6 e mean-reversion su tutta la serie (una sola volta)...")
-    v6_signals_full = {name: eng.generate_signals(raw_full[name], instruments_3[name]) for name in SYMBOLS_3}
-    mr_signals_full = {name: generate_mean_reversion_signals(raw_full[name], instruments_3[name], mode="rsi")
-                        for name in SYMBOLS_3}
-    log("Fatto.\n")
-
-    # ============================================================
-    # Check A — sanity: GOLD tradable=False deve == motore standard
-    # ============================================================
-    log("--- Check A: sanity (GOLD escluso deve == motore a 2 strumenti, periodo 2023) ---")
-    ps_2023 = pd.Timestamp("2023-01-02", tz="UTC")
-    pe_2023 = pd.Timestamp("2023-12-30", tz="UTC") + pd.Timedelta(days=1)
-    v6_sig_2023_2 = {k: slice_period(v6_signals_full[k], ps_2023, pe_2023) for k in ("DAX", "FTSE100")}
-
-    eng_std = BacktestEngineFloatingKillSwitch(capital0=CAPITAL_V6, instruments=instruments_2)
-    trades_std, _ = eng_std.run(v6_sig_2023_2)
-
-    eng_ext_bypass = BacktestEngineV6Gold(capital0=CAPITAL_V6, instruments=instruments_2)
-    trades_ext, _ = eng_ext_bypass.run(v6_sig_2023_2)
-
-    identical = (len(trades_std) == len(trades_ext) and
-                 abs(trades_std["pnl"].sum() - trades_ext["pnl"].sum()) < 0.01)
-    log(f"  Standard:  n={len(trades_std)} PnL={trades_std['pnl'].sum():+.2f}")
-    log(f"  Esteso (GOLD escluso): n={len(trades_ext)} PnL={trades_ext['pnl'].sum():+.2f}")
-    log(f"  Check A: {'PASS' if identical else 'FAIL - fermo qui'}\n")
-
-    if not identical:
-        os.makedirs("results", exist_ok=True)
-        with open("results/engine_three_asset_gold_test.txt", "w") as f:
-            f.write("\n".join(log_lines))
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        print("ERRORE: CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN mancanti.")
         return
-
-    # ============================================================
-    # Check B — impatto sui 5 periodi ufficiali, V6 e MR separatamente
-    # ============================================================
-    log("--- Check B: impatto sui 5 periodi ufficiali ---\n")
-    rows = []
-    for label, p_start_str, p_end_str in PERIODS:
-        p_start = pd.Timestamp(p_start_str, tz="UTC")
-        p_end = pd.Timestamp(p_end_str, tz="UTC") + pd.Timedelta(days=1)
-        log(f"Periodo {label}")
-
-        v6_sig_3 = {name: slice_period(v6_signals_full[name], p_start, p_end) for name in SYMBOLS_3}
-        v6_sig_2_only = {k: v for k, v in v6_sig_3.items() if k != "GOLD"}
-
-        eng_v6_base = BacktestEngineFloatingKillSwitch(capital0=CAPITAL_V6, instruments=instruments_2)
-        trades_v6_base, _ = eng_v6_base.run(v6_sig_2_only)
-        m_v6_base = metrics_summary(trades_v6_base, CAPITAL_V6)
-
-        eng_v6_gold = BacktestEngineV6Gold(capital0=CAPITAL_V6, instruments=instruments_3)
-        trades_v6_gold, _ = eng_v6_gold.run(v6_sig_3)
-        m_v6_gold = metrics_summary(trades_v6_gold, CAPITAL_V6)
-        gold_trades_v6 = 0 if trades_v6_gold.empty else (trades_v6_gold["instrument"] == "GOLD").sum()
-
-        log(f"  V6 baseline (2 strum.): n={m_v6_base['n_trades']:3d} WR={m_v6_base['win_rate_pct']:.1f}% "
-            f"PF={m_v6_base['profit_factor']:.2f} PnL={m_v6_base['pnl_total']:+.2f} maxDD={m_v6_base['max_drawdown_pct']:.1f}%")
-        log(f"  V6 +GOLD    (3 strum.): n={m_v6_gold['n_trades']:3d} WR={m_v6_gold['win_rate_pct']:.1f}% "
-            f"PF={m_v6_gold['profit_factor']:.2f} PnL={m_v6_gold['pnl_total']:+.2f} maxDD={m_v6_gold['max_drawdown_pct']:.1f}%  "
-            f"(di cui GOLD: {gold_trades_v6})")
-        log(f"  Delta V6 PnL: {m_v6_gold['pnl_total'] - m_v6_base['pnl_total']:+.2f}")
-
-        mr_sig_3 = {name: slice_period(mr_signals_full[name], p_start, p_end) for name in SYMBOLS_3}
-        mr_sig_2_only = {k: v for k, v in mr_sig_3.items() if k != "GOLD"}
-
-        eng_mr_base = BacktestEngineMeanReversion(capital0=CAPITAL_MR, instruments=instruments_2)
-        trades_mr_base, _ = eng_mr_base.run(mr_sig_2_only)
-        m_mr_base = metrics_summary(trades_mr_base, CAPITAL_MR)
-
-        eng_mr_gold = BacktestEngineMeanReversionGold(capital0=CAPITAL_MR, instruments=instruments_3)
-        trades_mr_gold, _ = eng_mr_gold.run(mr_sig_3)
-        m_mr_gold = metrics_summary(trades_mr_gold, CAPITAL_MR)
-        gold_trades_mr = 0 if trades_mr_gold.empty else (trades_mr_gold["instrument"] == "GOLD").sum()
-
-        log(f"  MR baseline (2 strum.): n={m_mr_base['n_trades']:3d} WR={m_mr_base['win_rate_pct']:.1f}% "
-            f"PF={m_mr_base['profit_factor']:.2f} PnL={m_mr_base['pnl_total']:+.2f} maxDD={m_mr_base['max_drawdown_pct']:.1f}%")
-        log(f"  MR +GOLD    (3 strum.): n={m_mr_gold['n_trades']:3d} WR={m_mr_gold['win_rate_pct']:.1f}% "
-            f"PF={m_mr_gold['profit_factor']:.2f} PnL={m_mr_gold['pnl_total']:+.2f} maxDD={m_mr_gold['max_drawdown_pct']:.1f}%  "
-            f"(di cui GOLD: {gold_trades_mr})")
-        log(f"  Delta MR PnL: {m_mr_gold['pnl_total'] - m_mr_base['pnl_total']:+.2f}\n")
-
-        rows.append({
-            "periodo": label,
-            "v6_base_n": m_v6_base["n_trades"], "v6_base_pnl": m_v6_base["pnl_total"],
-            "v6_base_dd": m_v6_base["max_drawdown_pct"],
-            "v6_gold_n": m_v6_gold["n_trades"], "v6_gold_pnl": m_v6_gold["pnl_total"],
-            "v6_gold_dd": m_v6_gold["max_drawdown_pct"], "v6_gold_trades": gold_trades_v6,
-            "mr_base_n": m_mr_base["n_trades"], "mr_base_pnl": m_mr_base["pnl_total"],
-            "mr_base_dd": m_mr_base["max_drawdown_pct"],
-            "mr_gold_n": m_mr_gold["n_trades"], "mr_gold_pnl": m_mr_gold["pnl_total"],
-            "mr_gold_dd": m_mr_gold["max_drawdown_pct"], "mr_gold_trades": gold_trades_mr,
-        })
-
-    summary_df = pd.DataFrame(rows)
-    os.makedirs("results", exist_ok=True)
-    summary_df.to_csv("results/engine_three_asset_gold_test.csv", index=False)
-
-    log(f"{'='*70}\nRIEPILOGO — somma sui 5 periodi ufficiali\n{'='*70}")
-    log(f"V6  baseline: PnL={summary_df['v6_base_pnl'].sum():+.2f}  "
-        f"+GOLD: PnL={summary_df['v6_gold_pnl'].sum():+.2f}  "
-        f"delta={summary_df['v6_gold_pnl'].sum()-summary_df['v6_base_pnl'].sum():+.2f}")
-    log(f"V6  drawdown medio — baseline: {summary_df['v6_base_dd'].mean():.1f}%  +GOLD: {summary_df['v6_gold_dd'].mean():.1f}%")
-    log(f"V6  trade totali su GOLD: {summary_df['v6_gold_trades'].sum()}")
-    log(f"MR  baseline: PnL={summary_df['mr_base_pnl'].sum():+.2f}  "
-        f"+GOLD: PnL={summary_df['mr_gold_pnl'].sum():+.2f}  "
-        f"delta={summary_df['mr_gold_pnl'].sum()-summary_df['mr_base_pnl'].sum():+.2f}")
-    log(f"MR  drawdown medio — baseline: {summary_df['mr_base_dd'].mean():.1f}%  +GOLD: {summary_df['mr_gold_dd'].mean():.1f}%")
-    log(f"MR  trade totali su GOLD: {summary_df['mr_gold_trades'].sum()}")
-    log(f"Periodi in cui V6+GOLD migliora il PnL: {(summary_df['v6_gold_pnl'] > summary_df['v6_base_pnl']).sum()}/5")
-    log(f"Periodi in cui MR+GOLD migliora il PnL: {(summary_df['mr_gold_pnl'] > summary_df['mr_base_pnl']).sum()}/5")
-
-    with open("results/engine_three_asset_gold_test.txt", "w") as f:
-        f.write("\n".join(log_lines))
-
-    print("\n=== Completato. ===")
+    signals = load_data()
+    run_sanity_check(signals)
+    results = run_causal_test(signals)
+    bootstrap_delta(results)
 
 
 if __name__ == "__main__":
