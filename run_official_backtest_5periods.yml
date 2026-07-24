@@ -1,0 +1,44 @@
+name: Backtest Ufficiale V6 — 5 Periodi (spread reale aggiornato)
+
+# Riesegue Variante 6 sui 5 periodi standard dopo l'aggiornamento
+# spread_fixed in engine.py (24/07/2026, DAX 2.68pt / FTSE100 1.57pt,
+# media reale osservata). Necessario prima di usare qualunque numero
+# ufficiale (win rate, PF, PnL) in confronti o decisioni successive —
+# vedi nota in engine.py e 00_CURRENT_STATE.md.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  official-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install pandas numpy requests
+
+      - name: Scarica OHLC DAX+FTSE100 da Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python fetch_ohlc_d1.py
+
+      - name: Esegui backtest ufficiale 5 periodi
+        run: python run_official_backtest_5periods.py
+
+      - name: Carica risultati come artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-backtest-5periods-${{ github.run_id }}
+          path: results/
+          retention-days: 90
+          if-no-files-found: warn
