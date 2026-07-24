@@ -2,6 +2,16 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
+AGGIORNAMENTO 24/07/2026 (2) — _ASSUMED_SPREAD ALLINEATO A engine.py:
+Il valore di riferimento usato solo per il log diagnostico di
+sample_spread() (confronto "scarto" spread reale vs assunto) era rimasto
+1.2/1.0 anche dopo l'aggiornamento di engine.py a 2.68/1.57 (media
+osservata su spread_samples D1, 108 campioni/strumento, 17/07-24/07/2026).
+Nessun impatto su ordini reali/shadow: quelli usano SEMPRE il prezzo
+bid/offer letto in tempo reale da IG (session.get_price()), mai questa
+costante — è puramente informativo per il log. Aggiornato qui solo per
+coerenza col motore, non per correttezza dei conti (già corretti prima).
+
 AGGIORNAMENTO 24/07/2026 — POSIZIONI SHADOW IN DRY_RUN (chiusura gap
 scoperto in chat): prima di questa modifica, con DRY_RUN=true nessuna
 riga veniva MAI scritta in live_positions — di conseguenza tre controlli
@@ -383,7 +393,13 @@ def compute_margin_state(session: IGSession) -> float | None:
 # cron separato.
 # =====================================================================
 
-_ASSUMED_SPREAD = {"DAX": 1.2, "FTSE100": 1.0}  # da engine.py, spread_fixed
+# AGGIORNATO 24/07/2026 (2): era {"DAX": 1.2, "FTSE100": 1.0} (placeholder
+# copiato dal vecchio spread_fixed di engine.py). Ora coerente col motore
+# aggiornato — media reale osservata su spread_samples D1 (n=108/strumento,
+# 17/07-24/07/2026, solo mercato TRADEABLE). Solo diagnostico: gli ordini
+# reali/shadow usano sempre il prezzo bid/offer letto in tempo reale da IG,
+# mai questa costante.
+_ASSUMED_SPREAD = {"DAX": 2.68, "FTSE100": 1.57}
 
 
 def sample_spread(session: IGSession):
