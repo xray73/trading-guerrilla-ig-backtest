@@ -1,0 +1,23 @@
+name: Test DAX+GOLD vs DAX+FTSE100 (sostituzione)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-substitution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests yfinance
+      - name: Esegui confronto DAX+GOLD vs DAX+FTSE100
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python test_dax_gold_vs_dax_ftse.py
