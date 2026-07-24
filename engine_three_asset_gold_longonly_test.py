@@ -70,11 +70,11 @@ def run_sanity_check(signals: dict):
     for label, (start, end) in PERIODS.items():
         data = slice_period(signals, start, end)
 
-        eng_baseline = BacktestEngineV6Gold(capital=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
+        eng_baseline = BacktestEngineV6Gold(capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
         trades_base, metrics_base = eng_baseline.run(data)
 
         eng_neutral = BacktestEngineV6GoldLongOnly(
-            capital=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
+            capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
             gold_longonly_filter_active=False,
         )
         trades_neutral, metrics_neutral = eng_neutral.run(data)
@@ -104,12 +104,12 @@ def run_causal_test(signals: dict):
     for label, (start, end) in PERIODS.items():
         data = slice_period(signals, start, end)
 
-        eng_baseline = BacktestEngineV6Gold(capital=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
+        eng_baseline = BacktestEngineV6Gold(capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS)
         trades_base, _ = eng_baseline.run(data)
         pnl_base = eng_baseline.capital - CAPITALE_INIZIALE
 
         eng_filtered = BacktestEngineV6GoldLongOnly(
-            capital=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
+            capital0=CAPITALE_INIZIALE, instruments=INSTRUMENTS,
             gold_longonly_filter_active=True,
         )
         trades_filt, _ = eng_filtered.run(data)
