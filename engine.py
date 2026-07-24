@@ -49,7 +49,31 @@ l'ingresso avviene SEMPRE all'apertura della barra N+1.
 
 Output: DataFrame trades / run_metrics con nomi colonna compatibili con lo
 schema D1 reale (tabelle trades, run_metrics, backtest_runs) verificato via
-PRAGMA table_info — vedi funzioni export_trades_for_d1() / export_metrics_for_d1().
+PRAGMA table_info() — vedi funzioni export_trades_for_d1() / export_metrics_for_d1().
+
+AGGIORNAMENTO 24/07/2026 — SPREAD_FIXED AGGIORNATO A VALORI REALI OSSERVATI:
+DECISIONE ESPLICITA DI SCONGELARE LA FASE 1 (era dichiarata "completata e
+congelata" in 00_CURRENT_STATE.md). spread_fixed era marcato "da
+riverificare" fin dall'origine del Charter (sez. 3) — ora sostituito con
+la media osservata su campione reale IG (spread_samples in D1, 108
+campioni per strumento, 17/07-24/07/2026, solo mercato TRADEABLE):
+DAX 1.2 -> 2.68pt, FTSE100 1.0 -> 1.57pt. Impatto atteso GIA' QUANTIFICATO
+in spread_sensitivity_revalidation.py: PnL totale storico ~36% più basso
+con spread realistico rispetto ai valori precedenti — V6 resta
+profittevole su tutti i 5 periodi ufficiali, ma i numeri (win rate,
+profit factor, PnL assoluto) in tutta la documentazione ufficiale
+(Project Charter, 00_CURRENT_STATE.md, RCA) sono ora DISALLINEATI rispetto
+a quello che questo motore produce e vanno rigenerati.
+NECESSITA' APERTA (registrata anche in memoria/decision log): rieseguire
+i backtest ufficiali sui 5 periodi con questo spread aggiornato e
+aggiornare tutte le tabelle di risultati nei documenti di progetto prima
+di usare quei numeri per qualunque nuova decisione comparativa. Fino ad
+allora, qualunque confronto "A batte B" scritto nei documenti esistenti
+è calcolato con lo spread vecchio (sottostimato) — le conclusioni
+dovrebbero restare qualitativamente valide (il pattern è monotono e
+il -36% è un impatto aggregato su PnL assoluto, non un effetto che
+inverte confronti relativi già stretti), ma non sono state riverificate
+esplicitamente con il valore nuovo.
 """
 
 from __future__ import annotations
@@ -73,8 +97,8 @@ class InstrumentConfig:
     atr_multiplier: float           # 1.5x per entrambi (RCA sez. 12)
     risk_pct: float                 # 2.0% DAX, 1.5% FTSE100 (Charter sez. 3)
     point_value: float              # EUR per punto per unità di size, verificato IG
-    spread_fixed: float             # punti — "da riverificare" (Charter sez. 3),
-                                     # valori correnti da RCA sez. 5 generalizzazione
+    spread_fixed: float             # punti — aggiornato 24/07/2026 a media reale
+                                     # osservata (spread_samples D1, n=108/strumento)
     min_tradable_size: float        # 0.50 per DAX/FTSE100, verificato "Get Info" IG
     margin_pct: float               # 5% per DAX/FTSE100, verificato IG
 
@@ -83,13 +107,13 @@ INSTRUMENTS: dict[str, InstrumentConfig] = {
     "DAX": InstrumentConfig(
         name="DAX", tradable=True,
         breakout_lookback=20, atr_multiplier=1.5, risk_pct=0.020,
-        point_value=1.0, spread_fixed=1.2,
+        point_value=1.0, spread_fixed=2.68,
         min_tradable_size=0.50, margin_pct=0.05,
     ),
     "FTSE100": InstrumentConfig(
         name="FTSE100", tradable=True,
         breakout_lookback=40, atr_multiplier=1.5, risk_pct=0.015,
-        point_value=1.0, spread_fixed=1.0,
+        point_value=1.0, spread_fixed=1.57,
         min_tradable_size=0.50, margin_pct=0.05,
     ),
     # US500: escluso dall'universo attivo (segnale più debole + vincolo size
