@@ -1,0 +1,34 @@
+name: Test causale GOLD long-only
+
+# Sanity check + confronto GOLD long+short (baseline) vs GOLD long-only,
+# sui 5 periodi ufficiali, con bootstrap a blocchi di giornata.
+# Scoperta 24/07/2026: short su GOLD ha R medio netto negativo (-0,102 con
+# spread reale), long positivo (+0,154, z=2,44) — questo test verifica se
+# la differenza regge anche col motore vero (size/capitale/selezione multi-
+# candidato), non solo sull'R-multiple puro delle query D1.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-gold-longonly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install dukascopy-python pandas numpy requests yfinance
+
+      - name: Esegui test causale GOLD long-only
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python engine_three_asset_gold_longonly_test.py
