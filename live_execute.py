@@ -2,6 +2,47 @@
 live_execute.py — Collega check-segnale, sizing (rispettando
 l'accantonamento in D1) e ig_client per l'esecuzione su IG demo.
 
+AGGIORNAMENTO 24/07/2026 — POSIZIONI SHADOW IN DRY_RUN (chiusura gap
+scoperto in chat): prima di questa modifica, con DRY_RUN=true nessuna
+riga veniva MAI scritta in live_positions — di conseguenza tre controlli
+di stato erano strutturalmente inerti per tutta la durata della Fase 2:
+limite_ordini_giorno (orders_today_v6/mr non si incrementava mai),
+slot_pieno (open_positions sempre vuoto) e strumento_gia_in_posizione
+(stesso motivo). Il sistema generava candidati multipli sullo stesso
+strumento nello stesso giorno anche quando, con un motore vero, il primo
+segnale avrebbe già occupato lo slot — scoperto confrontando il tracking
+candidati live con la ricostruzione manuale di 9 segnali del 22/07/2026.
+
+Soluzione: nuova colonna live_positions.is_shadow (1 se aperta mentre
+DRY_RUN=true, 0 se reale). La posizione viene ORA sempre scritta in
+live_positions, indipendentemente da DRY_RUN — solo la chiamata a
+session.place_order(..., dry_run=DRY_RUN) decide se l'ordine tocca
+davvero IG. Tutto il resto del file (gestione uscite, chiusura,
+aggiornamento capitale pool, kill switch, accantonamento) NON conosce
+la differenza tra shadow e reale — nessuno di quei punti controllava già
+DRY_RUN, solo la chiamata IG lo fa — quindi questa singola modifica
+trasforma DRY_RUN da "logga solo i segnali" a un vero paper trading
+simulato: le posizioni si aprono e chiudono, il capitale del pool evolve,
+il kill switch e l'accantonamento diventano finalmente testabili in
+condizioni realistiche. Effetto collaterale positivo: live_trades inizia
+ad accumulare righe anche in demo simulata, risolvendo il problema già
+documentato per cui i trade DRY_RUN non si accumulavano da nessuna parte
+utile ai criteri go/no-go di Fase 3/4 (50-100 trade richiesti).
+
+Unica eccezione esplicita: manage_open_positions() ora usa
+pos["is_shadow"] (non la DRY_RUN globale) per decidere se la CHIUSURA di
+una posizione deve toccare IG davvero — necessario per correttezza nel
+caso limite in cui DRY_RUN cambi valore mentre una posizione aperta in
+un regime è ancora aperta quando il ciclo successivo gira nell'altro
+regime (raro ma possibile, es. cambio manuale di DRY_RUN a metà giornata).
+
+Rischio esplicito da tenere presente: il capitale dei pool (capital_
+current_v6/mr) ora si muove anche in demo simulata sulla base di
+posizioni MAI realmente aperte su IG — comportamento voluto (è paper
+trading vero, non solo un log statico), ma va ricordato leggendo i numeri
+di live_daily_state finché DRY_RUN=true: riflettono una simulazione
+coerente con le regole reali, non ancora soldi o posizioni vere su IG.
+
 AGGIORNAMENTO 21/07/2026 (parte 3) — LIVELLO 3: MARGINE REALE AGGREGATO:
 Il tetto equity (Livello 1) confronta solo il capitale di RISCHIO
 tracciato (capital_v6+capital_mr) contro l'equity reale — non il
@@ -42,11 +83,13 @@ se aprire l'ordine o solo tracciare il candidato (skip_reason
 esplicito: kill_switch_attivo, limite_ordini_giorno, slot_pieno,
 strumento_gia_in_posizione, atr_non_disponibile,
 prezzo_non_disponibile, size_sotto_minimo_dopo_valvola [solo MR],
-margine_insufficiente, dry_run). Nuova funzione log_candidate_bars()
-logga ad ogni ciclo la prossima barra disponibile per ogni candidato
-ancora in tracking, in live_v6/mr_candidate_bars (completo quando
-esiste bar_offset=48, nessun flag is_complete separato — stesso
-principio di live_position_bars -> live_closed_position_bars).
+margine_insufficiente). NOTA 24/07/2026: skip_reason="dry_run" non
+esiste più come motivo di skip — una posizione DRY_RUN ora si "apre"
+regolarmente (shadow), non viene più saltata. Nuova funzione
+log_candidate_bars() logga ad ogni ciclo la prossima barra disponibile
+per ogni candidato ancora in tracking, in live_v6/mr_candidate_bars
+(completo quando esiste bar_offset=48, nessun flag is_complete separato
+— stesso principio di live_position_bars -> live_closed_position_bars).
 Tabelle live_v6/mr_candidates_tracking e live_v6/mr_candidate_bars gia'
 create manualmente su D1 (IF NOT EXISTS, non da questo script),
 comprese di colonna skip_reason aggiunta il 21/07/2026.
@@ -287,7 +330,12 @@ def compute_margin_state(session: IGSession) -> float | None:
     posizioni aperte (V6+MR insieme, condividono lo stesso conto/margine
     reale anche se i pool di capitale sono contabili separati). Ritorna
     margine_libero, o None se l'equity non e' leggibile (fail-safe: il
-    chiamante non blocca in questo caso, stesso pattern di apply_equity_cap)."""
+    chiamante non blocca in questo caso, stesso pattern di apply_equity_cap).
+
+    NOTA 24/07/2026: include ora anche le posizioni shadow (is_shadow=1)
+    nel calcolo del margine impegnato — corretto cosi', perche' il senso
+    del paper trading e' simulare vincoli realistici, incluso il margine
+    che una posizione reale equivalente occuperebbe."""
     try:
         bal = session.get_account_balance()
         equity_reale = bal["equity"]
@@ -891,11 +939,20 @@ def manage_open_positions(session: IGSession, today_str: str, hist_cache: dict):
             print(f"  [{pos['instrument']}/{pos['strategy']}] posizione ancora aperta, nessuna condizione di uscita.")
             continue
 
+        # --- CORRETTO 24/07/2026: usa is_shadow della SINGOLA posizione,
+        # non la DRY_RUN globale — necessario per correttezza se DRY_RUN
+        # cambia valore mentre una posizione aperta nel regime precedente
+        # e' ancora aperta (raro, ma altrimenti si rischierebbe di provare
+        # a chiudere su IG una posizione mai realmente aperta, o viceversa
+        # di NON chiudere su IG una posizione reale perche' la DRY_RUN
+        # globale nel frattempo e' diventata true). ---
+        pos_is_shadow = bool(pos.get("is_shadow"))
         close_direction = "SELL" if pos["direction"] == "long" else "BUY"
-        print(f"  [{pos['instrument']}/{pos['strategy']}] condizione di uscita: {exit_reason} — chiudo (dry_run={DRY_RUN})")
+        tipo = "SHADOW" if pos_is_shadow else "reale"
+        print(f"  [{pos['instrument']}/{pos['strategy']}] condizione di uscita: {exit_reason} — chiudo posizione {tipo}")
         result = session.close_position(
             deal_id=pos["ig_deal_id"] or "SIMULATA", direction=close_direction,
-            size=pos["size"], dry_run=DRY_RUN,
+            size=pos["size"], dry_run=pos_is_shadow,
         )
 
         if pos["direction"] == "long":
@@ -1097,32 +1154,35 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
             continue
 
         direction = "BUY" if sig == "long" else "SELL"
+        tipo_ordine = "SHADOW (dry-run simulato)" if DRY_RUN else "reale su IG"
         print(f"  [V6/{name}] segnale {sig.upper()} — size={size:.2f} "
               f"(forzata al minimo={forced_min}) stop={stop_distance_pts:.1f}pt "
-              f"target={limit_distance_pts:.1f}pt margine_richiesto={margin_required:.2f} EUR (dry_run={DRY_RUN})")
+              f"target={limit_distance_pts:.1f}pt margine_richiesto={margin_required:.2f} EUR ({tipo_ordine})")
 
         result = session.place_order(
             instrument=name, direction=direction, size=size,
             stop_distance=stop_distance_pts, limit_distance=limit_distance_pts, dry_run=DRY_RUN,
         )
 
-        if DRY_RUN:
-            record_candidate_v6(name, signals, last_closed_idx, now, was_executed=0,
-                                 skip_reason="dry_run")
-            print(f"    Simulato, nessuna scrittura in live_positions (solo in modalità reale).")
-            continue
-
-        deal_id = result.get("dealId", "")
+        # --- CORRETTO 24/07/2026: la posizione si scrive SEMPRE in
+        # live_positions, con is_shadow=1 se DRY_RUN — vedi docstring in
+        # cima al file per il ragionamento completo. Rimosso il ramo
+        # "if DRY_RUN: record_candidate(skip_reason='dry_run'); continue"
+        # che prima bloccava qui, lasciando tutti i controlli di stato
+        # (limite ordini, slot, strumento gia' in posizione) strutturalmente
+        # inerti per tutta la durata di DRY_RUN. ---
+        is_shadow = 1 if DRY_RUN else 0
+        deal_id = result.get("dealId") or ("SHADOW" if DRY_RUN else "")
         stop_loss = entry_price - stop_distance_pts if sig == "long" else entry_price + stop_distance_pts
         take_profit = entry_price + limit_distance_pts if sig == "long" else entry_price - limit_distance_pts
 
         d1_query(
             "INSERT INTO live_positions (account_type, instrument, direction, status, entry_time, "
             "entry_price, stop_loss, take_profit, size, risk_amount, atr_at_entry, "
-            "max_holding_bars, ig_deal_id, strategy) VALUES ("
+            "max_holding_bars, ig_deal_id, strategy, is_shadow) VALUES ("
             f"'demo', '{name}', '{sig}', 'open', '{now.isoformat()}', {entry_price}, "
             f"{stop_loss}, {take_profit}, {size}, {risk_amount}, {atr}, "
-            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'v6')"
+            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'v6', {is_shadow})"
         )
         d1_query(
             f"UPDATE live_daily_state SET orders_today_v6 = orders_today_v6 + 1, "
@@ -1130,13 +1190,22 @@ def detect_and_open_signals_v6(session: IGSession, today_str: str, hist_cache: d
         )
         candidate_key = record_candidate_v6(name, signals, last_closed_idx, now, was_executed=1,
                                              skip_reason=None)
-        print(f"    Posizione V6 aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
+        print(f"    Posizione V6 aperta ({tipo_ordine}), deal_id={deal_id}, candidate_key={candidate_key}")
 
         # --- Aggiorna margine_libero DENTRO lo stesso ciclo: un ordine
-        # reale appena piazzato consuma margine anche per i controlli
-        # successivi (prossimo strumento V6, poi tutto il ciclo MR) ---
+        # (reale o shadow) appena piazzato consuma margine anche per i
+        # controlli successivi (prossimo strumento V6, poi tutto il ciclo
+        # MR) — vedi nota 24/07/2026 in compute_margin_state() sul perche'
+        # anche lo shadow deve contare qui. ---
         if margine_libero is not None:
             margine_libero -= margin_required
+
+        # --- aggiorna lo stato locale usato per i controlli successivi
+        # in questo stesso ciclo (altrimenti un secondo segnale sullo
+        # stesso strumento nello stesso ciclo non verrebbe bloccato) ---
+        slots_full = (len(open_positions) + 1) >= eng.PARAMS.max_concurrent_positions
+        open_instruments.add(name)
+        orders_limit_hit = (day_state.get("orders_today_v6", 0) or 0) + 1 >= eng.PARAMS.max_new_orders_per_day
 
     return margine_libero
 
@@ -1251,32 +1320,30 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
             continue
 
         direction = "BUY" if sig == "long" else "SELL"
+        tipo_ordine = "SHADOW (dry-run simulato)" if DRY_RUN else "reale su IG"
         print(f"  [MR/{name}] segnale {sig.upper()} — size={size:.2f} "
               f"stop={stop_distance_pts:.1f}pt target={limit_distance_pts:.1f}pt "
-              f"margine_richiesto={margin_required:.2f} EUR (dry_run={DRY_RUN})")
+              f"margine_richiesto={margin_required:.2f} EUR ({tipo_ordine})")
 
         result = session.place_order(
             instrument=name, direction=direction, size=size,
             stop_distance=stop_distance_pts, limit_distance=limit_distance_pts, dry_run=DRY_RUN,
         )
 
-        if DRY_RUN:
-            record_candidate_mr(name, signals, last_closed_idx, now, was_executed=0,
-                                 skip_reason="dry_run")
-            print(f"    Simulato, nessuna scrittura in live_positions (solo in modalità reale).")
-            continue
-
-        deal_id = result.get("dealId", "")
+        # --- CORRETTO 24/07/2026: stessa modifica di detect_and_open_
+        # signals_v6, vedi commento li' e la docstring in cima al file. ---
+        is_shadow = 1 if DRY_RUN else 0
+        deal_id = result.get("dealId") or ("SHADOW" if DRY_RUN else "")
         stop_loss = entry_price - stop_distance_pts if sig == "long" else entry_price + stop_distance_pts
         take_profit = entry_price + limit_distance_pts if sig == "long" else entry_price - limit_distance_pts
 
         d1_query(
             "INSERT INTO live_positions (account_type, instrument, direction, status, entry_time, "
             "entry_price, stop_loss, take_profit, size, risk_amount, atr_at_entry, "
-            "max_holding_bars, ig_deal_id, strategy) VALUES ("
+            "max_holding_bars, ig_deal_id, strategy, is_shadow) VALUES ("
             f"'demo', '{name}', '{sig}', 'open', '{now.isoformat()}', {entry_price}, "
             f"{stop_loss}, {take_profit}, {size}, {risk_amount}, {atr}, "
-            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'mean_reversion')"
+            f"{eng.PARAMS.max_holding_bars}, '{deal_id}', 'mean_reversion', {is_shadow})"
         )
         d1_query(
             f"UPDATE live_daily_state SET orders_today_mr = orders_today_mr + 1, "
@@ -1284,10 +1351,14 @@ def detect_and_open_signals_mr(session: IGSession, today_str: str, hist_cache: d
         )
         candidate_key = record_candidate_mr(name, signals, last_closed_idx, now, was_executed=1,
                                              skip_reason=None)
-        print(f"    Posizione MR aperta su IG, deal_id={deal_id}, candidate_key={candidate_key}")
+        print(f"    Posizione MR aperta ({tipo_ordine}), deal_id={deal_id}, candidate_key={candidate_key}")
 
         if margine_libero is not None:
             margine_libero -= margin_required
+
+        slots_full = (len(open_positions) + 1) >= eng.PARAMS.max_concurrent_positions
+        open_instruments.add(name)
+        orders_limit_hit = (day_state.get("orders_today_mr", 0) or 0) + 1 >= eng.PARAMS.max_new_orders_per_day
 
     return margine_libero
 
@@ -1297,7 +1368,8 @@ def main():
         print("ERRORE: CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN mancanti.")
         sys.exit(1)
 
-    print(f"=== live_execute.py — DRY_RUN={DRY_RUN} — {datetime.now(timezone.utc).isoformat()} ===\n")
+    modalita = "PAPER TRADING SIMULATO (shadow positions, DRY_RUN=true)" if DRY_RUN else "REALE su IG"
+    print(f"=== live_execute.py — modalita': {modalita} — {datetime.now(timezone.utc).isoformat()} ===\n")
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     creds = load_credentials_from_env()
