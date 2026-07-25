@@ -41,6 +41,20 @@ from engine_floating_kill_switch import BacktestEngineFloatingKillSwitch
 CAPITAL0 = 2000.0  # capitale reale (Charter, non i 900€ di riferimento esplorativo)
 
 
+def load_full_ohlc_mixed(csv_path: str) -> pd.DataFrame:
+    """Sostituisce g.load_full_ohlc(): quella usa pd.to_datetime senza
+    format='mixed', e va in crash su DAX_full.csv/FTSE100_full.csv perché
+    ohlc_prices in D1 contiene sia righe storiche (formato con spazio,
+    "2026-07-10 19:30:00+00:00") sia righe scritte con isoformat() prima
+    del fix del 20/07/2026 in ohlc_data_source.py (formato con T,
+    "2026-07-12T22:00:00+00:00") — stesso bug, stesso fix, qui applicato
+    localmente per non modificare ema_grid_search.py (usato da altri
+    script già funzionanti su dataset senza righe in formato T)."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="mixed")
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
 def run_period(period_label: str, full_data: dict) -> tuple[pd.DataFrame, dict]:
     data = {}
     for name in ["DAX", "FTSE100"]:
@@ -84,8 +98,8 @@ def main():
     print(f"Capitale iniziale per periodo: {CAPITAL0:.0f}€ (walk-forward, ogni periodo riparte da qui)\n")
 
     full_data = {
-        "DAX": g.load_full_ohlc("DAX_full.csv"),
-        "FTSE100": g.load_full_ohlc("FTSE100_full.csv"),
+        "DAX": load_full_ohlc_mixed("DAX_full.csv"),
+        "FTSE100": load_full_ohlc_mixed("FTSE100_full.csv"),
     }
 
     all_trades = []
